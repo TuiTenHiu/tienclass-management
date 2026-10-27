@@ -6,6 +6,7 @@ import type {
   Criterion,
   GamePick,
   KV,
+  ParentLink,
   PointTransaction,
   Student,
   StudentComment,
@@ -24,6 +25,7 @@ export class PinkDB extends Dexie {
   criteria!: Table<Criterion, string>;
   transactions!: Table<PointTransaction, string>;
   comments!: Table<StudentComment, string>;
+  parentLinks!: Table<ParentLink, string>;
   gamePicks!: Table<GamePick, string>;
   activities!: Table<ActivityLog, string>;
   tasks!: Table<TodoTask, string>;
@@ -43,6 +45,9 @@ export class PinkDB extends Dexie {
       tasks: 'id, classId, done, createdAt',
       kv: 'key',
     });
+    this.version(2).stores({
+      parentLinks: 'id, classId, studentId, token, [classId+studentId]',
+    });
   }
 }
 
@@ -55,6 +60,7 @@ export const ALL_TABLES = [
   'criteria',
   'transactions',
   'comments',
+  'parentLinks',
   'gamePicks',
   'activities',
   'tasks',

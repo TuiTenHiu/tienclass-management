@@ -1,6 +1,7 @@
 import { lazy, Suspense, type ReactNode } from 'react';
 import { BrowserRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { AppProvider, useApp } from './state/AppContext';
+import { AuthProvider } from './state/AuthContext';
 import { ToastProvider } from './components/ToastNotification';
 import { AppLayout } from './components/AppLayout';
 import { EmptyState, LoadingState } from './components/States';
@@ -11,11 +12,14 @@ import StudentsPage from './pages/Students';
 import AttendancePage from './pages/Attendance';
 import PointsPage from './pages/Points';
 import CommentsPage from './pages/Comments';
+import ParentLinksPage from './pages/ParentLinks';
 import GamesPage from './pages/Games';
 import SettingsPage from './pages/Settings';
+import MigrationPage from './pages/Migration';
 
 const ReportsPage = lazy(() => import('./pages/Reports'));
 const DogGamePage = lazy(() => import('./pages/DogGame'));
+const ParentPortalPage = lazy(() => import('./pages/ParentPortal'));
 
 /** Các trang cần có lớp đang chọn */
 export function RequireClass({ children }: { children: ReactNode }) {
@@ -61,36 +65,41 @@ function NotFound() {
 export default function App() {
   return (
     <ToastProvider>
-      <AppProvider>
-        <PinGate>
-          <BrowserRouter>
-            <Suspense fallback={<LoadingState />}>
-              <Routes>
-                <Route
-                  path="/games/dog"
-                  element={
-                    <RequireClass>
-                      <DogGamePage />
-                    </RequireClass>
-                  }
-                />
-                <Route element={<AppLayout />}>
-                  <Route index element={<Dashboard />} />
-                  <Route path="classes" element={<ClassesPage />} />
-                  <Route path="students" element={<RequireClass><StudentsPage /></RequireClass>} />
-                  <Route path="attendance" element={<RequireClass><AttendancePage /></RequireClass>} />
-                  <Route path="points" element={<RequireClass><PointsPage /></RequireClass>} />
-                  <Route path="comments" element={<RequireClass><CommentsPage /></RequireClass>} />
-                  <Route path="games" element={<RequireClass><GamesPage /></RequireClass>} />
-                  <Route path="reports" element={<RequireClass><ReportsPage /></RequireClass>} />
-                  <Route path="settings" element={<SettingsPage />} />
-                  <Route path="*" element={<NotFound />} />
-                </Route>
-              </Routes>
-            </Suspense>
-          </BrowserRouter>
-        </PinGate>
-      </AppProvider>
+      <AuthProvider>
+        <AppProvider>
+          <PinGate>
+            <BrowserRouter>
+              <Suspense fallback={<LoadingState />}>
+                <Routes>
+                  <Route
+                    path="/games/dog"
+                    element={
+                      <RequireClass>
+                        <DogGamePage />
+                      </RequireClass>
+                    }
+                  />
+                  <Route path="/parent/portal" element={<ParentPortalPage />} />
+                  <Route element={<AppLayout />}>
+                    <Route index element={<Dashboard />} />
+                    <Route path="classes" element={<ClassesPage />} />
+                    <Route path="students" element={<RequireClass><StudentsPage /></RequireClass>} />
+                    <Route path="attendance" element={<RequireClass><AttendancePage /></RequireClass>} />
+                    <Route path="points" element={<RequireClass><PointsPage /></RequireClass>} />
+                    <Route path="comments" element={<RequireClass><CommentsPage /></RequireClass>} />
+                    <Route path="parent-links" element={<RequireClass><ParentLinksPage /></RequireClass>} />
+                    <Route path="games" element={<RequireClass><GamesPage /></RequireClass>} />
+                    <Route path="reports" element={<RequireClass><ReportsPage /></RequireClass>} />
+                    <Route path="settings" element={<SettingsPage />} />
+                    <Route path="migration" element={<MigrationPage />} />
+                    <Route path="*" element={<NotFound />} />
+                  </Route>
+                </Routes>
+              </Suspense>
+            </BrowserRouter>
+          </PinGate>
+        </AppProvider>
+      </AuthProvider>
     </ToastProvider>
   );
 }

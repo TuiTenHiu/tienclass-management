@@ -75,3 +75,10 @@ export function useGamePicks(classId: string | undefined) {
     return list.sort((a, b) => b.createdAt - a.createdAt);
   }, [classId]);
 }
+
+export function useParentLinks(classId: string | undefined) {
+  return useLiveQuery(async () => {
+    if (!classId) return [];
+    return db.parentLinks.where('classId').equals(classId).toArray();
+  }, [classId]);
+}

@@ -10,6 +10,8 @@ import {
   BarChart3,
   Settings,
   X,
+  MessageCircle,
+  DatabaseBackup,
   type LucideIcon,
 } from 'lucide-react';
 import { LogoMark } from './illustrations';
@@ -21,9 +23,11 @@ export const NAV_ITEMS: { to: string; label: string; icon: LucideIcon; end?: boo
   { to: '/attendance', label: 'Điểm danh', icon: CalendarCheck },
   { to: '/points', label: 'Điểm thưởng & thi đua', icon: Star },
   { to: '/comments', label: 'Nhận xét học sinh', icon: MessageSquareHeart },
+  { to: '/parent-links', label: 'Sổ liên lạc & Zalo', icon: MessageCircle },
   { to: '/games', label: 'Trò chơi lớp học', icon: Gamepad2 },
   { to: '/reports', label: 'Báo cáo thống kê', icon: BarChart3 },
   { to: '/settings', label: 'Cài đặt', icon: Settings },
+  { to: '/migration', label: 'Di trú dữ liệu', icon: DatabaseBackup },
 ];
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {

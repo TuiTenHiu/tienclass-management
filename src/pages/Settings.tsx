@@ -7,8 +7,16 @@ import {
   Trash2,
   Sparkles,
   Save,
+  Database,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  LogIn,
+  LogOut,
+  RefreshCw,
 } from 'lucide-react';
 import { useApp } from '../state/AppContext';
+import { useAuth } from '../state/AuthContext';
 import { PageHeader, Field, Toggle } from '../components/ui';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useToast } from '../components/ToastNotification';
@@ -21,9 +29,11 @@ import {
   bulkAddStudents,
 } from '../data/repo';
 import { sha256 } from '../lib/utils';
+import { checkSupabaseConnection, isSupabaseConfigured, type SupabaseAuthCheckResult } from '../lib/supabaseClient';
 
 export default function SettingsPage() {
   const { settings, setCurrentClassId } = useApp();
+  const auth = useAuth();
   const toast = useToast();
 
   const [teacherName, setTeacherName] = useState(settings.teacherName);
@@ -35,6 +45,68 @@ export default function SettingsPage() {
   const [newPin, setNewPin] = useState('');
   const [confirmWipe, setConfirmWipe] = useState(false);
   const [loadingDemo, setLoadingDemo] = useState(false);
+
+  // Đăng nhập / Đăng ký tài khoản Supabase
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  // Kiểm tra kết nối Supabase
+  const [checkingSupabase, setCheckingSupabase] = useState(false);
+  const [supabaseStatus, setSupabaseStatus] = useState<SupabaseAuthCheckResult | null>(null);
+
+  const handleAuthSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail.trim() || !authPassword) {
+      toast.error('Vui lòng nhập email và mật khẩu');
+      return;
+    }
+    setAuthSubmitting(true);
+    try {
+      const res = await auth.signIn(authEmail, authPassword);
+      if (res.ok) {
+        setAuthPassword('');
+        toast.success(`Đã đăng nhập: ${res.profile?.fullName || authEmail} (${res.profile?.role || 'parent'})`);
+      } else {
+        toast.error(res.message || 'Đăng nhập thất bại');
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleAuthSignOut = async () => {
+    await auth.signOut();
+    toast.info('Đã đăng xuất tài khoản Supabase');
+  };
+
+  const handleManualSync = async () => {
+    try {
+      const res = await auth.syncNow();
+      if (res.synced) {
+        toast.success(`Đã đồng bộ ${res.classesCount} lớp học và ${res.studentsCount} học sinh từ Supabase`);
+      } else {
+        toast.info('Tài khoản hiện tại không ở chế độ giáo viên/quản trị viên để đồng bộ lớp học');
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Lỗi khi đồng bộ dữ liệu');
+    }
+  };
+
+  const handleTestSupabase = async () => {
+    setCheckingSupabase(true);
+    try {
+      const res = await checkSupabaseConnection();
+      setSupabaseStatus(res);
+      if (res.ok) {
+        toast.success('Kết nối Auth API thành công!');
+      } else {
+        toast.error(res.message);
+      }
+    } finally {
+      setCheckingSupabase(false);
+    }
+  };
 
   const handleSaveProfile = async () => {
     try {
@@ -242,6 +314,128 @@ export default function SettingsPage() {
             {newPin ? 'Cập nhật PIN' : 'Gỡ bỏ PIN'}
           </button>
         </div>
+      </div>
+
+      {/* Tài khoản & Đồng bộ Supabase */}
+      <div className="card p-6 space-y-4">
+        <h3 className="font-display font-extrabold text-base flex items-center gap-2">
+          <Database className="w-5 h-5 text-pink-500" />
+          Tài khoản & Đồng bộ Supabase
+        </h3>
+        <p className="text-sm text-ink-soft">
+          Đăng nhập tài khoản giáo viên để đồng bộ lớp học, tiêu chí thi đua và danh sách học sinh với cơ sở dữ liệu tập trung (vẫn giữ nguyên dữ liệu Offline trên trình duyệt).
+        </p>
+
+        {auth.user && auth.profile ? (
+          <div className="p-4 rounded-xl bg-pink-50/70 border border-pink-200 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-bold text-sm text-ink">{auth.profile.fullName}</p>
+                <p className="text-xs text-ink-soft">{auth.profile.email}</p>
+              </div>
+              <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-white border border-pink-200 text-pink-600 uppercase">
+                Vai trò: {auth.profile.role}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              {auth.isCloudTeacher && (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={handleManualSync}
+                  disabled={auth.syncing}
+                >
+                  <RefreshCw className={`w-4 h-4 ${auth.syncing ? 'animate-spin' : ''}`} />
+                  {auth.syncing ? 'Đang đồng bộ...' : 'Đồng bộ lớp & học sinh'}
+                </button>
+              )}
+              <button type="button" className="btn-outline" onClick={handleAuthSignOut}>
+                <LogOut className="w-4 h-4" /> Đăng xuất
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleAuthSignIn} className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            <Field label="Email đăng nhập">
+              <input
+                type="email"
+                className="input"
+                placeholder="teacher@school.edu.vn"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+              />
+            </Field>
+            <Field label="Mật khẩu">
+              <input
+                type="password"
+                className="input"
+                placeholder="••••••••"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+              />
+            </Field>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={authSubmitting || !isSupabaseConfigured}
+            >
+              {authSubmitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" /> Đang xử lý...
+                </>
+              ) : (
+                <>
+                  <LogIn className="w-4 h-4" /> Đăng nhập
+                </>
+              )}
+            </button>
+          </form>
+        )}
+
+        <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-pink-100">
+          <button
+            className="btn-outline"
+            onClick={handleTestSupabase}
+            disabled={checkingSupabase}
+          >
+            {checkingSupabase ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> Đang kiểm tra...
+              </>
+            ) : (
+              'Kiểm tra kết nối Auth API'
+            )}
+          </button>
+
+          <span className="text-xs text-ink-soft">
+            Trạng thái cấu hình file: {isSupabaseConfigured ? (
+              <b className="text-mint-dark">Đã tìm thấy biến môi trường</b>
+            ) : (
+              <b className="text-danger">Chưa có biến môi trường</b>
+            )}
+          </span>
+        </div>
+
+        {supabaseStatus && (
+          <div
+            className={`p-3.5 rounded-xl border text-sm flex items-start gap-2.5 ${
+              supabaseStatus.ok
+                ? 'bg-mint/30 border-mint-dark/30 text-ink'
+                : 'bg-danger-soft border-danger/30 text-danger'
+            }`}
+          >
+            {supabaseStatus.ok ? (
+              <CheckCircle2 className="w-5 h-5 text-mint-dark shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="w-5 h-5 text-danger shrink-0 mt-0.5" />
+            )}
+            <div>
+              <p className="font-semibold">{supabaseStatus.ok ? 'Phản hồi thành công' : 'Kết nối thất bại'}</p>
+              <p className="text-xs opacity-90 mt-0.5">{supabaseStatus.message}</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Trải nghiệm & Dữ liệu mẫu */}

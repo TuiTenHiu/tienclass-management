@@ -3,6 +3,19 @@
 
 export type ID = string;
 
+export type UserRole = 'admin' | 'teacher' | 'parent';
+
+export interface UserProfile {
+  id: ID;
+  email: string | null;
+  fullName: string;
+  role: UserRole;
+  phone?: string | null;
+  avatarUrl?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface ClassRoom {
   id: ID;
   name: string;
@@ -78,6 +91,8 @@ export interface PointTransaction {
   undoneAt?: number;
 }
 
+export type CommentStatus = 'draft' | 'sent';
+
 export interface StudentComment {
   id: ID;
   classId: ID;
@@ -86,8 +101,63 @@ export interface StudentComment {
   session: Session | 'all';
   content: string;
   tags: string[];
+  status?: CommentStatus; // 'draft' hoặc 'sent' (mặc định 'sent' đối với bản ghi cũ)
+  sentAt?: number;        // thời điểm gửi cho phụ huynh
   createdAt: number;
   updatedAt: number;
+}
+
+export interface ParentLink {
+  id: ID;
+  classId: ID;
+  studentId: ID;
+  /**
+   * Chế độ Offline: mã token ngẫu nhiên mã hóa an toàn (crypto.getRandomValues).
+   * Chế độ Cloud (Supabase): luôn để rỗng '' trong DB/IndexedDB (không bao giờ lưu raw_token).
+   */
+  token: string;
+  /** Bản băm SHA-256 (64 ký tự hex) lưu tại public.parent_invitation_tokens */
+  tokenHash?: string;
+  parentPhone?: string;
+  expiresAt?: number;
+  isRevoked?: boolean;
+  revokedAt?: number;
+  usedAt?: number;
+  usedBy?: ID | null;
+  /** Đánh dấu học sinh đã có tài khoản phụ huynh xác minh qua public.parent_students */
+  isVerifiedParentLinked?: boolean;
+  /**
+   * Mã raw_token chỉ trả về 1 lần duy nhất trong bộ nhớ (RAM) ngay khi vừa tạo/cấp lại
+   * để giáo viên sao chép gửi phụ huynh; tuyệt đối không lưu vào Supabase hay IndexedDB ở chế độ Cloud.
+   */
+  issuedRawToken?: string;
+  createdAt: number;
+  updatedAt: number;
+  lastSentAt?: number;
+}
+
+export interface ParentPortalStudentData {
+  student: {
+    id: ID;
+    code: string;
+    fullName: string;
+    birthDate?: string;
+    gender: Gender;
+    avatar: string;
+    status: StudentStatus;
+  };
+  relationship: string;
+  verifiedAt?: string | null;
+  classInfo: {
+    id: ID;
+    name: string;
+    schoolYear: string;
+    subject?: string;
+    color: string;
+  } | null;
+  attendance: AttendanceRecord[];
+  points: PointTransaction[];
+  sentComments: StudentComment[];
 }
 
 export interface GamePick {

@@ -97,7 +97,7 @@ export default function AttendancePage() {
       await saveAttendance(classId, date, session, entries);
       toast.success('Đã lưu dữ liệu điểm danh thành công!');
     } catch (e) {
-      toast.error('Lỗi khi lưu điểm danh');
+      toast.error(e instanceof Error ? e.message : 'Lỗi khi lưu điểm danh');
     } finally {
       setSaving(false);
     }

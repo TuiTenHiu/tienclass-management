@@ -17,9 +17,15 @@ dist-ssr
 !.vscode/extensions.json
 .idea
 .DS_Store
+.env
+.env.*
+!.env.example
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 .vercel
+*.tsbuildinfo
+*backup*.json
+

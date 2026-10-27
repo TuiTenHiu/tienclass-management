@@ -1,6 +1,26 @@
 // Tiện ích dùng chung: id, ngày tháng, chuỗi tiếng Việt.
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Tạo UUID v4 chuẩn RFC 4122 tương thích trực tiếp với khóa chính UUID trên Supabase */
+export function uuidv4(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/** Kiểm tra một chuỗi có phải là UUID hợp lệ của PostgreSQL/Supabase hay không */
+export function isUUID(value: string | null | undefined): boolean {
+  return Boolean(value && UUID_REGEX.test(value));
+}
+
 export function uid(prefix = ''): string {
+  if (!prefix) return uuidv4();
   const rnd =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID().replace(/-/g, '').slice(0, 16)
@@ -138,6 +158,16 @@ export function isValidISODate(s: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const d = parseISODate(s);
   return toISODate(d) === s;
+}
+
+/** Tính số tuần chuẩn ISO (1..53) từ chuỗi ngày YYYY-MM-DD */
+export function isoWeekNumber(dateISO: string): number {
+  const d = parseISODate(dateISO);
+  const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = utc.getUTCDay() || 7;
+  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1));
+  return Math.ceil(((utc.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
 }
 
 export function isValidPhone(s: string): boolean {

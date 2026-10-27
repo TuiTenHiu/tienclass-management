@@ -5,6 +5,9 @@ import {
   Trash2,
   Sparkles,
   Search,
+  Send,
+  FileEdit,
+  CheckCircle2,
 } from 'lucide-react';
 import { useApp } from '../state/AppContext';
 import { useStudents, useComments } from '../state/hooks';
@@ -41,6 +44,7 @@ export default function CommentsPage() {
   const [studentId, setStudentId] = useState('');
   const [date, setDate] = useState(() => toISODate());
   const [content, setContent] = useState('');
+  const [status, setStatus] = useState<'draft' | 'sent'>('sent');
   const [query, setQuery] = useState('');
 
   const openCreate = () => {
@@ -48,6 +52,7 @@ export default function CommentsPage() {
     setStudentId(students?.[0]?.id ?? '');
     setDate(toISODate());
     setContent('');
+    setStatus('sent');
     setModalOpen(true);
   };
 
@@ -56,14 +61,16 @@ export default function CommentsPage() {
     setStudentId(c.studentId);
     setDate(c.date);
     setContent(c.content);
+    setStatus(c.status ?? 'sent');
     setModalOpen(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (targetStatus?: 'draft' | 'sent') => {
     if (!classId || !studentId || !content.trim()) {
       toast.error('Vui lòng chọn học sinh và nhập nội dung nhận xét');
       return;
     }
+    const finalStatus = targetStatus ?? status;
     try {
       await saveComment(
         classId,
@@ -73,13 +80,20 @@ export default function CommentsPage() {
           session: 'all',
           content: content.trim(),
           tags: [],
+          status: finalStatus,
         },
         editing?.id
       );
-      toast.success(editing ? 'Đã cập nhật nhận xét' : 'Đã lưu nhận xét học sinh');
+      toast.success(
+        editing
+          ? 'Đã cập nhật nhận xét'
+          : finalStatus === 'sent'
+          ? 'Đã lưu và duyệt gửi nhận xét cho phụ huynh'
+          : 'Đã lưu nhận xét dạng bản nháp'
+      );
       setModalOpen(false);
     } catch (e) {
-      toast.error('Lỗi khi lưu nhận xét');
+      toast.error(e instanceof Error ? e.message : 'Lỗi khi lưu nhận xét');
     }
   };
 
@@ -89,8 +103,9 @@ export default function CommentsPage() {
       await deleteComment(deletingId);
       toast.success('Đã xóa nhận xét');
       setDeletingId(null);
-    } catch {
-      toast.error('Không thể xóa nhận xét');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Không thể xóa nhận xét');
+      setDeletingId(null);
     }
   };
 
@@ -166,9 +181,20 @@ export default function CommentsPage() {
                         <span className="text-[12px] text-ink-soft font-mono">{st?.code}</span>
                       </div>
                     </div>
-                    <span className="chip bg-pink-100 text-pink-600 !text-[11.5px]">
-                      {formatDateVN(c.date)}
-                    </span>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="chip bg-pink-100 text-pink-600 !text-[11.5px]">
+                        {formatDateVN(c.date)}
+                      </span>
+                      {c.status === 'draft' ? (
+                        <span className="chip bg-cream text-cream-dark !text-[10.5px]">
+                          <FileEdit className="w-3 h-3" /> Bản nháp (chưa gửi)
+                        </span>
+                      ) : (
+                        <span className="chip bg-mint text-mint-dark !text-[10.5px]">
+                          <CheckCircle2 className="w-3 h-3" /> Đã gửi phụ huynh
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <p className="text-[14px] text-ink whitespace-pre-line leading-relaxed bg-pink-50/50 p-3 rounded-xl border border-pink-100/60">
@@ -210,8 +236,11 @@ export default function CommentsPage() {
             <button className="btn-ghost" onClick={() => setModalOpen(false)}>
               Hủy
             </button>
-            <button className="btn-primary" onClick={handleSave}>
-              Lưu nhận xét
+            <button className="btn-secondary" onClick={() => handleSave('draft')}>
+              <FileEdit className="w-4 h-4" /> Lưu nháp
+            </button>
+            <button className="btn-primary" onClick={() => handleSave('sent')}>
+              <Send className="w-4 h-4" /> Duyệt & Gửi phụ huynh
             </button>
           </>
         }
@@ -251,6 +280,36 @@ export default function CommentsPage() {
               value={content}
               onChange={(e) => setContent(e.target.value)}
             />
+          </Field>
+
+          <Field label="Trạng thái hiển thị với phụ huynh">
+            <div className="flex gap-3">
+              <label className="flex items-center gap-2 cursor-pointer text-sm">
+                <input
+                  type="radio"
+                  name="comment-status"
+                  className="accent-pink-500"
+                  checked={status === 'sent'}
+                  onChange={() => setStatus('sent')}
+                />
+                <span className="font-semibold text-mint-dark flex items-center gap-1">
+                  <CheckCircle2 className="w-4 h-4" /> Đã gửi (phụ huynh xem được)
+                </span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer text-sm">
+                <input
+                  type="radio"
+                  name="comment-status"
+                  className="accent-pink-500"
+                  checked={status === 'draft'}
+                  onChange={() => setStatus('draft')}
+                />
+                <span className="font-semibold text-cream-dark flex items-center gap-1">
+                  <FileEdit className="w-4 h-4" /> Bản nháp (chỉ giáo viên xem)
+                </span>
+              </label>
+            </div>
           </Field>
 
           {/* Gợi ý câu nhận xét thân thiện */}
