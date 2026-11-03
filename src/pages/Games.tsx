@@ -6,6 +6,7 @@ import { PageHeader } from '../components/ui';
 import { formatDateTimeVN } from '../lib/utils';
 import { clearGamePicks } from '../data/repo';
 import { useToast } from '../components/ToastNotification';
+import { isMobileDevice, enterFullscreenThenLockLandscape } from '../components/LandscapeFullscreenGuard';
 
 export default function GamesPage() {
   const { currentClass } = useApp();
@@ -15,6 +16,14 @@ export default function GamesPage() {
 
   const students = useStudents(classId, 'active');
   const picks = useGamePicks(classId);
+
+  const handleLaunchGame = (path: '/games/dog' | '/games/ufo') => {
+    if (isMobileDevice()) {
+      // Kích hoạt Fullscreen trước rồi khóa hướng ngang ngay trong user gesture của nút Bắt đầu
+      enterFullscreenThenLockLandscape(document.documentElement).catch(() => {});
+    }
+    navigate(path);
+  };
 
   const handleClearHistory = async () => {
     if (!classId) return;
@@ -57,7 +66,7 @@ export default function GamesPage() {
 
             <button
               className="btn-primary w-full py-3 h-auto text-base bg-gradient-to-r from-pink-500 to-amber-500 hover:from-pink-600 hover:to-amber-600 text-white"
-              onClick={() => navigate('/games/dog')}
+              onClick={() => handleLaunchGame('/games/dog')}
               disabled={!students?.length}
             >
               <Play className="w-5 h-5 fill-white" /> Bắt đầu trò chơi
@@ -90,7 +99,7 @@ export default function GamesPage() {
 
             <button
               className="btn-primary w-full py-3 h-auto text-base bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white"
-              onClick={() => navigate('/games/ufo')}
+              onClick={() => handleLaunchGame('/games/ufo')}
               disabled={!students?.length}
             >
               <Play className="w-5 h-5 fill-white" /> Bắt đầu trò chơi

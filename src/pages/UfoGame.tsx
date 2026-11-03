@@ -26,7 +26,11 @@ import { saveGamePick, clearGamePicks } from '../data/repo';
 import { AnimalAvatarSVG } from '../components/avatars';
 import { formatDateTimeVN } from '../lib/utils';
 import { useToast } from '../components/ToastNotification';
-import { useGameOrientationAndFullscreen, LandscapeRotateOverlay } from '../components/LandscapeFullscreenGuard';
+import {
+  useGameOrientationAndFullscreen,
+  useStageFit,
+  LandscapeRotateOverlay,
+} from '../components/LandscapeFullscreenGuard';
 import type { Student } from '../types';
 
 export type UfoGameStage = 'idle' | 'scan' | 'abduct' | 'celebrate';
@@ -158,6 +162,7 @@ export default function UfoGamePage() {
   const picks = useGamePicks(classId);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const mainStageRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Cấu hình trò chơi
@@ -180,6 +185,7 @@ export default function UfoGamePage() {
   // Hook quản lý xoay ngang bắt buộc và toàn màn hình
   const {
     isPortrait,
+    isCompactLandscape,
     showRotateOverlay,
     isFullscreen,
     isPseudoFullscreen,
@@ -200,6 +206,7 @@ export default function UfoGamePage() {
   });
 
   const isLandscape = !isPortrait;
+  const stageSize = useStageFit(mainStageRef, 1000 / 560);
 
   // Danh sách ID đã được chọn
   const alreadyPickedIds = useMemo(() => {
@@ -1598,11 +1605,14 @@ export default function UfoGamePage() {
 
   // Helper dọn dẹp các timer trong chuỗi sequence gắp học sinh
   const clearAbductSequenceTimers = useCallback(() => {
-    abductSequenceTimersRef.current.forEach((t) => clearTimeout(t));
+    abductSequenceTimersRef.current.forEach((t) => {
+      clearTimeout(t);
+      clearInterval(t);
+    });
     abductSequenceTimersRef.current = [];
   }, []);
 
-  // Kích hoạt chuỗi animation gắp học sinh:
+  // Kích hoạt chuỗi animation gắp học sinh (tự động đóng băng tiến trình khi tạm dừng / xoay dọc):
   // - Nếu lớp có từ 2 học sinh trở lên: thực hiện gắp thử rồi thả xuống tối đa 2 bạn (chọn ngẫu nhiên 1 hoặc 2 lần thử, hoặc 0 nếu lớp chỉ có 1 bạn)
   // - Không trùng học sinh trong cùng lượt chơi
   // - Lần gắp cuối cùng giữ trọn vẹn animation 8.3 giây
@@ -1617,6 +1627,11 @@ export default function UfoGamePage() {
     setStage('abduct');
 
     let currentTimelineMs = 0;
+    const schedule: Array<{ atMs: number; executed: boolean; run: () => void }> = [];
+
+    const enqueueStep = (atMs: number, run: () => void) => {
+      schedule.push({ atMs, executed: false, run });
+    };
 
     // Helper thiết lập học sinh mục tiêu hiện tại trong stateRef
     const setFocusChar = (stud: Student) => {
@@ -1633,104 +1648,117 @@ export default function UfoGamePage() {
     // 1. CHUỖI GẮP THỬ TỐI ĐA 2 LẦN (MỖI LẦN THỬ KÉO DÀI ~4.3 GIÂY)
     fakeStudents.forEach((fakeStudent) => {
       // 1.1. Khóa mục tiêu bạn thử (0.9s)
-      const tLock = setTimeout(() => {
+      enqueueStep(currentTimelineMs, () => {
         setFocusChar(fakeStudent);
         setAbductStep('fake_lock');
         stateRef.current.abductStep = 'fake_lock';
         stateRef.current.abductStepTime = 0;
         playSfx('lock');
-      }, currentTimelineMs);
-      abductSequenceTimersRef.current.push(tLock);
+      });
       currentTimelineMs += 900;
 
       // 1.2. Mở tia hút (0.8s)
-      const tBeam = setTimeout(() => {
+      enqueueStep(currentTimelineMs, () => {
         setAbductStep('fake_beam');
         stateRef.current.abductStep = 'fake_beam';
         stateRef.current.abductStepTime = 0;
         playSfx('beam');
-      }, currentTimelineMs);
-      abductSequenceTimersRef.current.push(tBeam);
+      });
       currentTimelineMs += 800;
 
       // 1.3. Nhấc chân bay lên một đoạn 40-50% (1.4s)
-      const tLift = setTimeout(() => {
+      enqueueStep(currentTimelineMs, () => {
         setAbductStep('fake_lift');
         stateRef.current.abductStep = 'fake_lift';
         stateRef.current.abductStepTime = 0;
         playSfx('beam');
-      }, currentTimelineMs);
-      abductSequenceTimersRef.current.push(tLift);
+      });
       currentTimelineMs += 1400;
 
       // 1.4. Đổi ý: từ từ thả học sinh xuống mặt đất (1.2s)
-      const tDrop = setTimeout(() => {
+      enqueueStep(currentTimelineMs, () => {
         setAbductStep('fake_drop');
         stateRef.current.abductStep = 'fake_drop';
         stateRef.current.abductStepTime = 0;
         playSfx('drop');
-      }, currentTimelineMs);
-      abductSequenceTimersRef.current.push(tDrop);
+      });
       currentTimelineMs += 1200;
     });
 
     // 2. LẦN GẮP CUỐI CÙNG (GIỮ NGUYÊN TOÀN BỘ 8.3 GIÂY ĐẦY ĐỦ CAO TRÀO)
     // 2.1. Bước 1: Khóa mục tiêu chính thức (1.2s)
-    const tFinalLock = setTimeout(() => {
+    enqueueStep(currentTimelineMs, () => {
       setFocusChar(targetStudent);
       setAbductStep('lock_on');
       stateRef.current.abductStep = 'lock_on';
       stateRef.current.abductStepTime = 0;
       playSfx('lock');
-    }, currentTimelineMs);
-    abductSequenceTimersRef.current.push(tFinalLock);
+    });
     currentTimelineMs += 1200;
 
     // 2.2. Bước 2: Kích hoạt tia hút mở rộng (1.4s)
-    const tFinalBeam = setTimeout(() => {
+    enqueueStep(currentTimelineMs, () => {
       setAbductStep('beam_activate');
       stateRef.current.abductStep = 'beam_activate';
       stateRef.current.abductStepTime = 0;
       playSfx('beam');
-    }, currentTimelineMs);
-    abductSequenceTimersRef.current.push(tFinalBeam);
+    });
     currentTimelineMs += 1400;
 
     // 2.3. Bước 3: Học sinh từ từ bay lên theo phương thẳng đứng (3.5s)
-    const tFinalAscend = setTimeout(() => {
+    enqueueStep(currentTimelineMs, () => {
       setAbductStep('ascend');
       stateRef.current.abductStep = 'ascend';
       stateRef.current.abductStepTime = 0;
       playSfx('beam');
-    }, currentTimelineMs);
-    abductSequenceTimersRef.current.push(tFinalAscend);
+    });
     currentTimelineMs += 3500;
 
     // 2.4. Bước 4: Đưa vào bụng UFO (1.4s)
-    const tFinalEnter = setTimeout(() => {
+    enqueueStep(currentTimelineMs, () => {
       setAbductStep('enter_ufo');
       stateRef.current.abductStep = 'enter_ufo';
       stateRef.current.abductStepTime = 0;
       playSfx('enter');
-    }, currentTimelineMs);
-    abductSequenceTimersRef.current.push(tFinalEnter);
+    });
     currentTimelineMs += 1400;
 
     // 2.5. Bước 5: Nhịp chờ & công bố vinh danh (0.8s)
-    const tFinalWait = setTimeout(() => {
+    enqueueStep(currentTimelineMs, () => {
       setAbductStep('wait_reveal');
       stateRef.current.abductStep = 'wait_reveal';
       stateRef.current.abductStepTime = 0;
-    }, currentTimelineMs);
-    abductSequenceTimersRef.current.push(tFinalWait);
+    });
     currentTimelineMs += 800;
 
-    const tFinalFinish = setTimeout(() => {
+    enqueueStep(currentTimelineMs, () => {
+      clearAbductSequenceTimers();
       setAbductStep('none');
       stateRef.current.abductStep = 'none';
       finishGame(targetStudent);
-    }, currentTimelineMs);
-    abductSequenceTimersRef.current.push(tFinalFinish);
+    });
+
+    // Thực thi bước 0ms ngay lập tức
+    schedule.forEach((item) => {
+      if (!item.executed && item.atMs === 0) {
+        item.executed = true;
+        item.run();
+      }
+    });
+
+    let elapsedAbductMs = 0;
+    const tickInterval = setInterval(() => {
+      if (stateRef.current.isPaused) return;
+      elapsedAbductMs += 50;
+      for (const item of schedule) {
+        if (!item.executed && elapsedAbductMs >= item.atMs) {
+          item.executed = true;
+          item.run();
+        }
+      }
+    }, 50);
+
+    abductSequenceTimersRef.current.push(tickInterval as unknown as ReturnType<typeof setTimeout>);
   }, [playSfx, finishGame, clearAbductSequenceTimers]);
 
   const handleTogglePause = () => {
@@ -1834,54 +1862,58 @@ export default function UfoGamePage() {
   return (
     <div
       ref={containerRef}
-      className={`min-h-screen w-full bg-gradient-to-b from-slate-950 via-slate-900 to-indigo-950 select-none relative overflow-x-hidden ${
-        isFullscreen || isPseudoFullscreen
-          ? 'fixed inset-0 z-40 w-screen h-[100dvh] overflow-hidden flex flex-col justify-between'
-          : isLandscape
-          ? 'p-1 flex flex-col justify-between h-[100dvh] overflow-hidden'
-          : 'p-2 sm:p-4 flex flex-col items-center justify-between'
+      className={`w-full bg-gradient-to-b from-slate-950 via-slate-900 to-indigo-950 select-none overflow-hidden flex flex-col items-center justify-between ${
+        isFullscreen || isPseudoFullscreen || isLandscape
+          ? 'fixed inset-0 z-40 w-screen h-[100dvh] max-h-[100dvh]'
+          : 'min-h-[100dvh] h-[100dvh] max-h-[100dvh] relative p-2 sm:p-3'
       }`}
       style={{
-        paddingTop: isFullscreen || isPseudoFullscreen ? 'max(0.25rem, env(safe-area-inset-top))' : undefined,
-        paddingBottom: isFullscreen || isPseudoFullscreen ? 'max(0.25rem, env(safe-area-inset-bottom))' : undefined,
-        paddingLeft: isFullscreen || isPseudoFullscreen ? 'max(0.5rem, env(safe-area-inset-left))' : undefined,
-        paddingRight: isFullscreen || isPseudoFullscreen ? 'max(0.5rem, env(safe-area-inset-right))' : undefined,
+        paddingTop: 'max(0.25rem, env(safe-area-inset-top))',
+        paddingBottom: 'max(0.25rem, env(safe-area-inset-bottom))',
+        paddingLeft: 'max(0.5rem, env(safe-area-inset-left))',
+        paddingRight: 'max(0.5rem, env(safe-area-inset-right))',
       }}
     >
       {/* Lớp phủ bắt buộc xoay ngang trên điện thoại */}
-      {showRotateOverlay && <LandscapeRotateOverlay onTryLockLandscape={lockLandscape} />}
+      {showRotateOverlay && (
+        <LandscapeRotateOverlay
+          onEnterFullscreenAndLandscape={requestGameFullscreen}
+          onTryLockLandscape={lockLandscape}
+          isPausedMidGame={isPaused && (stage === 'scan' || stage === 'abduct')}
+        />
+      )}
 
       {/* =======================================================================
        * 1. THANH ĐIỀU KHIỂN PHÍA TRÊN (HEADER CONTROLS)
        * ======================================================================= */}
       <header
-        className={`w-full max-w-5xl flex items-center justify-between gap-1.5 sm:gap-2 mb-1.5 sm:mb-2 px-2.5 sm:px-3 bg-slate-900/90 backdrop-blur-md py-1.5 sm:py-2.5 rounded-xl sm:rounded-2xl border border-indigo-500/30 shadow-lg text-white ${
-          isLandscape ? 'h-10 py-1' : ''
+        className={`w-full max-w-5xl shrink-0 flex items-center justify-between gap-1.5 sm:gap-2 px-2.5 sm:px-3 bg-slate-900/90 backdrop-blur-md rounded-xl sm:rounded-2xl border border-indigo-500/30 shadow-lg text-white z-20 ${
+          isCompactLandscape ? 'h-9 py-0.5 mb-0.5' : isLandscape ? 'h-10 py-1 mb-1' : 'py-1.5 sm:py-2 mb-1.5'
         }`}
       >
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
-            className="btn-ghost btn-sm text-xs sm:text-sm h-8 sm:h-9 px-2 sm:px-3 text-slate-200 hover:text-white hover:bg-slate-800"
+            className="btn-ghost btn-sm text-xs sm:text-sm h-7 sm:h-8 px-2 sm:px-3 text-slate-200 hover:text-white hover:bg-slate-800"
             onClick={() => navigate('/games')}
           >
             <ArrowLeft className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> <span className="hidden sm:inline">Về</span> Trò chơi
           </button>
-          <div className="flex items-center gap-1 bg-indigo-950/80 text-cyan-300 px-2 sm:px-3 py-0.5 sm:py-1 rounded-lg sm:rounded-xl font-bold text-xs sm:text-sm border border-indigo-500/40 truncate max-w-[140px] sm:max-w-none">
+          <div className="flex items-center gap-1 bg-indigo-950/80 text-cyan-300 px-2 sm:px-3 py-0.5 rounded-lg sm:rounded-xl font-bold text-xs sm:text-sm border border-indigo-500/40 truncate max-w-[140px] sm:max-w-none">
             <span className="truncate">{currentClass.name}</span>
             <span className="text-indigo-400 hidden sm:inline">•</span>
             <span className="text-indigo-300 font-normal hidden sm:inline">{currentClass.schoolYear}</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-1 sm:gap-2">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           {totalStudents > 0 && (
-            <span className="chip bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-bold text-[10px] sm:text-xs px-2 sm:px-2.5 py-0.5 sm:py-1 hidden sm:inline-flex">
+            <span className="chip bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-bold text-[10px] sm:text-xs px-2 sm:px-2.5 py-0.5 hidden sm:inline-flex">
               <Users className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-cyan-400" />
               <span>{validPickedCount}/{totalStudents}</span>
             </span>
           )}
 
-          <label className="flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-slate-200 cursor-pointer bg-slate-800/80 hover:bg-slate-800 px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg sm:rounded-xl border border-slate-700 transition">
+          <label className="flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-slate-200 cursor-pointer bg-slate-800/80 hover:bg-slate-800 px-2 sm:px-2.5 py-1 rounded-lg sm:rounded-xl border border-slate-700 transition">
             <input
               type="checkbox"
               className="accent-cyan-400 w-3 h-3 sm:w-3.5 sm:h-3.5 rounded"
@@ -1892,7 +1924,7 @@ export default function UfoGamePage() {
           </label>
 
           <button
-            className={`icon-btn w-8 h-8 sm:w-9 sm:h-9 ${musicEnabled ? 'text-cyan-300 bg-indigo-900/60 border border-cyan-500/40' : 'text-slate-400 bg-slate-800'}`}
+            className={`icon-btn w-7 h-7 sm:w-8 sm:h-8 ${musicEnabled ? 'text-cyan-300 bg-indigo-900/60 border border-cyan-500/40' : 'text-slate-400 bg-slate-800'}`}
             onClick={() => setMusicEnabled(!musicEnabled)}
             data-tip={musicEnabled ? 'Tắt nhạc nền' : 'Bật nhạc nền'}
             aria-label="Nhạc nền"
@@ -1901,7 +1933,7 @@ export default function UfoGamePage() {
           </button>
 
           <button
-            className={`icon-btn w-8 h-8 sm:w-9 sm:h-9 ${soundEnabled ? 'text-cyan-300 bg-indigo-900/60 border border-cyan-500/40' : 'text-slate-400 bg-slate-800'}`}
+            className={`icon-btn w-7 h-7 sm:w-8 sm:h-8 ${soundEnabled ? 'text-cyan-300 bg-indigo-900/60 border border-cyan-500/40' : 'text-slate-400 bg-slate-800'}`}
             onClick={() => setSoundEnabled(!soundEnabled)}
             data-tip={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
             aria-label="Âm thanh"
@@ -1910,7 +1942,7 @@ export default function UfoGamePage() {
           </button>
 
           <button
-            className="icon-btn w-8 h-8 sm:w-9 sm:h-9 text-slate-200 bg-slate-800 hover:bg-slate-700"
+            className="icon-btn w-7 h-7 sm:w-8 sm:h-8 text-slate-200 bg-slate-800 hover:bg-slate-700"
             onClick={toggleFullscreen}
             data-tip={isFullscreen ? 'Thu nhỏ' : 'Toàn màn hình'}
             aria-label="Toàn màn hình"
@@ -1919,7 +1951,7 @@ export default function UfoGamePage() {
           </button>
 
           <button
-            className="btn-outline btn-sm text-[11px] sm:text-xs h-8 sm:h-9 px-2 sm:px-3 bg-slate-800 text-slate-200 border-indigo-500/40 hover:bg-slate-700"
+            className="btn-outline btn-sm text-[11px] sm:text-xs h-7 sm:h-8 px-2 sm:px-3 bg-slate-800 text-slate-200 border-indigo-500/40 hover:bg-slate-700"
             onClick={() => setShowHistory(true)}
             data-tip="Xem lịch sử các bạn đã được UFO gắp"
           >
@@ -1932,33 +1964,43 @@ export default function UfoGamePage() {
       {/* =======================================================================
        * 2. VÙNG KHUNG HÌNH TRÒ CHƠI CHÍNH (CANVAS 1000x560 WIDESCREEN 16:9)
        * ======================================================================= */}
-      <main className="w-full max-w-5xl flex-1 flex flex-col items-center justify-center relative">
+      <main
+        ref={mainStageRef}
+        className="w-full max-w-5xl flex-1 min-h-0 flex flex-col items-center justify-center relative overflow-hidden"
+      >
         {totalStudents === 0 ? (
-          <div className="card p-8 text-center max-w-md w-full border-2 border-indigo-500/40 bg-slate-900/95 text-white shadow-2xl">
-            <div className="w-16 h-16 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-500/40 mx-auto flex items-center justify-center mb-4">
-              <Users className="w-8 h-8" />
+          <div className="card p-6 sm:p-8 text-center max-w-md w-full border-2 border-indigo-500/40 bg-slate-900/95 text-white shadow-2xl">
+            <div className="w-14 h-14 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-500/40 mx-auto flex items-center justify-center mb-3">
+              <Users className="w-7 h-7" />
             </div>
             <h3 className="font-display font-black text-xl text-white">Lớp học chưa có học sinh</h3>
             <p className="text-sm text-slate-300 mt-1">
               Hãy thêm học sinh vào {currentClass.name} để đĩa bay UFO chuẩn bị hạ cánh đón các bạn nhé!
             </p>
-            <button className="btn-primary mt-6 w-full" onClick={() => navigate('/students')}>
+            <button className="btn-primary mt-5 w-full" onClick={() => navigate('/students')}>
               <UserPlus className="w-4 h-4" /> Thêm học sinh vào lớp
             </button>
           </div>
         ) : (
-          <div className="relative w-full max-w-[1000px] card overflow-hidden border-2 sm:border-4 border-cyan-500/40 shadow-2xl bg-black aspect-[1000/560] max-h-[calc(100dvh-95px)]">
+          <div
+            className="relative card overflow-hidden border-2 sm:border-4 border-cyan-500/40 shadow-2xl bg-black aspect-[1000/560] max-w-full max-h-full flex items-center justify-center"
+            style={
+              stageSize
+                ? { width: `${stageSize.width}px`, height: `${stageSize.height}px` }
+                : { width: '100%', maxWidth: '1000px' }
+            }
+          >
             <canvas
               ref={canvasRef}
               width={1000}
               height={560}
-              className="w-full h-full block"
+              className="w-full h-full object-contain block"
             />
 
             {/* Huy hiệu chỉ dẫn phân cảnh */}
-            <div className="absolute top-3 left-3 flex items-center gap-2">
-              <div className="bg-slate-900/90 border border-cyan-500/50 backdrop-blur-xs text-white font-black text-xs sm:text-sm px-3.5 py-1.5 rounded-full shadow-lg flex items-center gap-2 animate-fadeIn">
-                <span className="w-5 h-5 rounded-full bg-cyan-400 text-slate-950 flex items-center justify-center text-xs font-black">
+            <div className="absolute top-2 sm:top-3 left-2 sm:left-3 flex items-center gap-2 pointer-events-none">
+              <div className="bg-slate-900/90 border border-cyan-500/50 backdrop-blur-xs text-white font-black text-[11px] sm:text-sm px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full shadow-lg flex items-center gap-1.5 sm:gap-2 animate-fadeIn">
+                <span className="w-4 h-4 sm:w-5 sm:h-5 rounded-full bg-cyan-400 text-slate-950 flex items-center justify-center text-[10px] sm:text-xs font-black">
                   {stage === 'idle' ? '1' : stage === 'scan' ? '2' : stage === 'abduct' ? '3' : '4'}
                 </span>
                 <span className="text-cyan-200">
@@ -1980,13 +2022,13 @@ export default function UfoGamePage() {
 
             {/* Đồng hồ đếm ngược 10 giây ở góc phải trên khi đang quét */}
             {stage === 'scan' && (
-              <div className="absolute top-3 right-3 flex items-center gap-2 animate-pop">
-                <div className="bg-slate-900/95 border-2 border-cyan-400 text-cyan-300 font-mono font-black text-sm sm:text-base px-3.5 py-1.5 rounded-full shadow-lg flex items-center gap-2">
-                  <span className="animate-spin text-lg">⏱️</span>
+              <div className="absolute top-2 sm:top-3 right-2 sm:right-3 flex items-center gap-1.5 sm:gap-2 animate-pop">
+                <div className="bg-slate-900/95 border-2 border-cyan-400 text-cyan-300 font-mono font-black text-xs sm:text-base px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full shadow-lg flex items-center gap-1.5">
+                  <span className="animate-spin text-sm sm:text-lg">⏱️</span>
                   <span>00:{String(countdown).padStart(2, '0')}</span>
                 </div>
                 <button
-                  className="btn-ghost btn-sm h-8 bg-slate-900/90 hover:bg-slate-800 text-xs text-cyan-300 border border-cyan-500/50 rounded-full font-bold shadow-md"
+                  className="btn-ghost btn-sm h-7 sm:h-8 bg-slate-900/90 hover:bg-slate-800 text-xs text-cyan-300 border border-cyan-500/50 rounded-full font-bold shadow-md px-2.5"
                   onClick={handleSkipToResult}
                   data-tip="Xem kết quả ngay"
                 >
@@ -1997,14 +2039,14 @@ export default function UfoGamePage() {
 
             {/* Thông báo Tạm dừng */}
             {isPaused && (
-              <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn z-20">
-                <div className="card p-6 bg-slate-900/95 rounded-3xl text-center max-w-xs shadow-2xl border-2 border-cyan-400 animate-pop text-white">
-                  <div className="w-12 h-12 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-500/50 mx-auto flex items-center justify-center mb-3">
-                    <Pause className="w-6 h-6 fill-cyan-400" />
+              <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 animate-fadeIn z-20">
+                <div className="card p-4 sm:p-6 bg-slate-900/95 rounded-3xl text-center max-w-xs shadow-2xl border-2 border-cyan-400 animate-pop text-white">
+                  <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-500/50 mx-auto flex items-center justify-center mb-2">
+                    <Pause className="w-5 h-5 sm:w-6 sm:h-6 fill-cyan-400" />
                   </div>
-                  <h3 className="font-display font-black text-xl text-white">Đang tạm dừng</h3>
+                  <h3 className="font-display font-black text-lg sm:text-xl text-white">Đang tạm dừng</h3>
                   <p className="text-xs text-slate-300 mt-1">Toàn bộ chuyển động UFO và đồng hồ đếm ngược đã dừng.</p>
-                  <button className="btn-primary mt-5 w-full h-11 text-sm font-bold bg-cyan-600 hover:bg-cyan-500 text-white" onClick={handleTogglePause}>
+                  <button className="btn-primary mt-4 w-full h-10 text-xs sm:text-sm font-bold bg-cyan-600 hover:bg-cyan-500 text-white" onClick={handleTogglePause}>
                     <Play className="w-4 h-4 fill-white" /> Tiếp tục giờ chơi
                   </button>
                 </div>
@@ -2013,17 +2055,17 @@ export default function UfoGamePage() {
 
             {/* Thông báo hết lượt cả lớp */}
             {roundExhausted && stage === 'idle' && (
-              <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn z-20">
-                <div className="card p-6 bg-slate-900 rounded-[26px] text-center max-w-sm w-full shadow-2xl animate-pop border-2 border-cyan-400 text-white">
-                  <h3 className="font-display font-black text-xl text-cyan-300">🎉 Đã gọi hết cả lớp!</h3>
-                  <p className="text-sm text-slate-300 mt-1.5">
+              <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 animate-fadeIn z-20">
+                <div className="card p-4 sm:p-6 bg-slate-900 rounded-[26px] text-center max-w-sm w-full shadow-2xl animate-pop border-2 border-cyan-400 text-white">
+                  <h3 className="font-display font-black text-lg sm:text-xl text-cyan-300">🎉 Đã gọi hết cả lớp!</h3>
+                  <p className="text-xs sm:text-sm text-slate-300 mt-1">
                     Tất cả {totalStudents} học sinh đã được đĩa bay UFO gắp một lượt. Thầy cô có muốn bắt đầu vòng chơi mới?
                   </p>
-                  <div className="mt-5 flex gap-2">
-                    <button className="btn-ghost flex-1 text-sm text-slate-300 hover:text-white" onClick={() => setRoundExhausted(false)}>
+                  <div className="mt-4 flex gap-2">
+                    <button className="btn-ghost flex-1 text-xs sm:text-sm text-slate-300 hover:text-white" onClick={() => setRoundExhausted(false)}>
                       Để sau
                     </button>
-                    <button className="btn-primary flex-1 text-sm font-bold bg-cyan-500 hover:bg-cyan-400 text-slate-950" onClick={handleStartNewCycle}>
+                    <button className="btn-primary flex-1 text-xs sm:text-sm font-bold bg-cyan-500 hover:bg-cyan-400 text-slate-950" onClick={handleStartNewCycle}>
                       Bắt đầu vòng mới
                     </button>
                   </div>
@@ -2036,25 +2078,25 @@ export default function UfoGamePage() {
              * ================================================================= */}
             {stage === 'celebrate' && pickedStudent && (
               <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 animate-fadeIn z-30">
-                <div className="relative card p-4 sm:p-6 bg-gradient-to-b from-slate-900 via-indigo-950 to-slate-900 rounded-[28px] sm:rounded-[32px] text-center max-w-[92vw] sm:max-w-md w-full shadow-2xl border-2 sm:border-4 border-yellow-400 animate-pop text-white max-h-[92vh] overflow-y-auto">
-                  <div className="inline-flex items-center gap-1.5 sm:gap-2 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 text-slate-950 font-display font-black text-xs sm:text-base px-4 sm:px-6 py-1.5 rounded-full shadow-xl border border-yellow-200 mx-auto mb-2">
-                    <Sparkles className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-slate-950 text-slate-950" />
+                <div className="relative card p-3 sm:p-5 bg-gradient-to-b from-slate-900 via-indigo-950 to-slate-900 rounded-[24px] sm:rounded-[32px] text-center max-w-[90%] sm:max-w-md w-full shadow-2xl border-2 sm:border-4 border-yellow-400 animate-pop text-white max-h-[94%] overflow-y-auto">
+                  <div className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 text-slate-950 font-display font-black text-[11px] sm:text-sm px-3.5 sm:px-5 py-1 rounded-full shadow-xl border border-yellow-200 mx-auto mb-1.5">
+                    <Sparkles className="w-3.5 h-3.5 fill-slate-950 text-slate-950" />
                     <span>CHÚC MỪNG BẠN ĐƯỢC CHỌN!</span>
-                    <Sparkles className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-slate-950 text-slate-950" />
+                    <Sparkles className="w-3.5 h-3.5 fill-slate-950 text-slate-950" />
                   </div>
 
-                  <div className="my-2 sm:my-3 flex justify-center">
-                    <div className="p-2.5 sm:p-3.5 rounded-2xl sm:rounded-3xl bg-gradient-to-br from-indigo-900 via-cyan-900 to-slate-800 border-2 sm:border-4 border-yellow-400 shadow-xl transform hover:scale-105 transition">
-                      <AnimalAvatarSVG avatarKey={pickedStudent.avatar} size={isLandscape ? 64 : 84} />
+                  <div className="my-1.5 sm:my-2.5 flex justify-center">
+                    <div className="p-2 sm:p-3 rounded-2xl bg-gradient-to-br from-indigo-900 via-cyan-900 to-slate-800 border-2 sm:border-4 border-yellow-400 shadow-xl">
+                      <AnimalAvatarSVG avatarKey={pickedStudent.avatar} size={isCompactLandscape ? 48 : isLandscape ? 60 : 80} />
                     </div>
                   </div>
 
-                  <h2 className="font-display font-black text-xl sm:text-2xl md:text-3xl text-cyan-200 tracking-tight truncate px-2">
+                  <h2 className="font-display font-black text-lg sm:text-2xl text-cyan-200 tracking-tight truncate px-2">
                     {pickedStudent.fullName}
                   </h2>
 
                   <div className="mt-1 flex items-center justify-center gap-2">
-                    <span className="font-mono text-[11px] sm:text-sm font-bold bg-indigo-900/80 text-yellow-300 px-2.5 sm:px-3 py-0.5 sm:py-1 rounded-full border border-yellow-400/40">
+                    <span className="font-mono text-[11px] sm:text-xs font-bold bg-indigo-900/80 text-yellow-300 px-2.5 py-0.5 rounded-full border border-yellow-400/40">
                       Mã HS: {pickedStudent.code}
                     </span>
                     <span className="text-[11px] sm:text-xs text-slate-300">
@@ -2062,15 +2104,15 @@ export default function UfoGamePage() {
                     </span>
                   </div>
 
-                  <div className="mt-4 sm:mt-6 flex gap-2">
+                  <div className="mt-3 sm:mt-4 flex gap-2">
                     <button
-                      className="btn-outline flex-1 min-h-[44px] sm:h-11 text-xs sm:text-sm font-bold text-slate-200 border-slate-700 hover:bg-slate-800 active:scale-95"
+                      className="btn-outline flex-1 min-h-[38px] sm:h-10 text-xs sm:text-sm font-bold text-slate-200 border-slate-700 hover:bg-slate-800 active:scale-95"
                       onClick={handleResetGame}
                     >
                       <RotateCcw className="w-4 h-4" /> Chơi lại
                     </button>
                     <button
-                      className="btn-primary flex-1 min-h-[44px] sm:h-11 text-xs sm:text-sm font-bold shadow-lg bg-gradient-to-r from-cyan-500 to-indigo-500 hover:from-cyan-400 hover:to-indigo-400 text-slate-950 active:scale-95"
+                      className="btn-primary flex-1 min-h-[38px] sm:h-10 text-xs sm:text-sm font-bold shadow-lg bg-gradient-to-r from-cyan-500 to-indigo-500 hover:from-cyan-400 hover:to-indigo-400 text-slate-950 active:scale-95"
                       onClick={handleNextRound}
                     >
                       <Play className="w-4 h-4 fill-slate-950" /> Lượt tiếp theo
@@ -2086,21 +2128,29 @@ export default function UfoGamePage() {
       {/* =======================================================================
        * 3. THANH ĐIỀU KHIỂN CHÍNH PHÍA DƯỚI (BOTTOM CONTROLS)
        * ======================================================================= */}
-      <footer className="w-full max-w-5xl mt-2 sm:mt-3 flex flex-wrap items-center justify-center gap-2 sm:gap-3 px-2 pb-2">
+      <footer
+        className={`w-full max-w-5xl shrink-0 flex flex-wrap items-center justify-center gap-2 sm:gap-3 px-2 z-20 ${
+          isCompactLandscape ? 'mt-0.5 pb-0.5' : 'mt-1.5 sm:mt-2 pb-1'
+        }`}
+      >
         {stage === 'idle' && (
           <button
-            className="btn-primary min-h-[48px] px-8 text-base font-black shadow-lg bg-gradient-to-r from-cyan-500 via-indigo-500 to-fuchsia-500 hover:from-cyan-400 hover:to-fuchsia-400 text-white transform hover:scale-102 transition border border-cyan-300/40"
+            className={`btn-primary px-6 sm:px-8 font-black shadow-lg bg-gradient-to-r from-cyan-500 via-indigo-500 to-fuchsia-500 hover:from-cyan-400 hover:to-fuchsia-400 text-white transform hover:scale-102 transition border border-cyan-300/40 ${
+              isCompactLandscape ? 'min-h-[38px] h-9 text-sm' : 'min-h-[44px] text-sm sm:text-base'
+            }`}
             onClick={handleStartGame}
             disabled={totalStudents === 0}
           >
-            <Rocket className="w-5 h-5" /> Bắt đầu giờ chơi 🛸
+            <Rocket className="w-4 h-4 sm:w-5 sm:h-5" /> Bắt đầu giờ chơi 🛸
           </button>
         )}
 
         {(stage === 'scan' || stage === 'abduct') && (
           <>
             <button
-              className={`btn-outline min-h-[46px] px-6 text-sm sm:text-base font-bold shadow-sm ${
+              className={`btn-outline px-5 sm:px-6 font-bold shadow-sm ${
+                isCompactLandscape ? 'min-h-[36px] h-9 text-xs sm:text-sm' : 'min-h-[42px] text-sm sm:text-base'
+              } ${
                 isPaused ? 'bg-cyan-500 text-slate-950 border-cyan-400' : 'bg-slate-900 border-indigo-500/50 text-cyan-300'
               }`}
               onClick={handleTogglePause}
@@ -2117,7 +2167,9 @@ export default function UfoGamePage() {
             </button>
 
             <button
-              className="btn-outline min-h-[46px] px-5 text-sm sm:text-base font-bold bg-slate-900 text-slate-200 border-indigo-500/40 hover:bg-slate-800"
+              className={`btn-outline px-4 sm:px-5 font-bold bg-slate-900 text-slate-200 border-indigo-500/40 hover:bg-slate-800 ${
+                isCompactLandscape ? 'min-h-[36px] h-9 text-xs sm:text-sm' : 'min-h-[42px] text-sm sm:text-base'
+              }`}
               onClick={handleResetGame}
             >
               <RotateCcw className="w-4 h-4" /> Chơi lại
@@ -2128,14 +2180,18 @@ export default function UfoGamePage() {
         {stage === 'celebrate' && (
           <>
             <button
-              className="btn-primary min-h-[48px] px-7 text-sm sm:text-base font-bold shadow-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950"
+              className={`btn-primary px-6 font-bold shadow-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 ${
+                isCompactLandscape ? 'min-h-[36px] h-9 text-xs sm:text-sm' : 'min-h-[42px] text-sm sm:text-base'
+              }`}
               onClick={handleNextRound}
             >
               <Play className="w-4 h-4 fill-slate-950" /> Lượt tiếp theo
             </button>
 
             <button
-              className="btn-outline min-h-[48px] px-6 text-sm sm:text-base font-bold bg-slate-900 text-slate-200 border-slate-700 hover:bg-slate-800"
+              className={`btn-outline px-5 font-bold bg-slate-900 text-slate-200 border-slate-700 hover:bg-slate-800 ${
+                isCompactLandscape ? 'min-h-[36px] h-9 text-xs sm:text-sm' : 'min-h-[42px] text-sm sm:text-base'
+              }`}
               onClick={handleResetGame}
             >
               <RotateCcw className="w-4 h-4" /> Về ban đầu

@@ -26,7 +26,11 @@ import { saveGamePick, clearGamePicks } from '../data/repo';
 import { AnimalAvatarSVG } from '../components/avatars';
 import { formatDateTimeVN } from '../lib/utils';
 import { useToast } from '../components/ToastNotification';
-import { useGameOrientationAndFullscreen, LandscapeRotateOverlay } from '../components/LandscapeFullscreenGuard';
+import {
+  useGameOrientationAndFullscreen,
+  useStageFit,
+  LandscapeRotateOverlay,
+} from '../components/LandscapeFullscreenGuard';
 import type { Student } from '../types';
 
 // ============================================================================
@@ -322,6 +326,7 @@ export default function DogGamePage() {
   const picks = useGamePicks(classId);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const mainStageRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Cấu hình trò chơi
@@ -343,6 +348,7 @@ export default function DogGamePage() {
   // Hook quản lý xoay ngang bắt buộc và toàn màn hình
   const {
     isPortrait,
+    isCompactLandscape,
     showRotateOverlay,
     isFullscreen,
     isPseudoFullscreen,
@@ -363,6 +369,7 @@ export default function DogGamePage() {
   });
 
   const isLandscape = !isPortrait;
+  const stageSize = useStageFit(mainStageRef, 1000 / 560);
 
   // Danh sách ID đã được gọi tên trong lớp
   const alreadyPickedIds = useMemo(() => {
@@ -650,7 +657,10 @@ export default function DogGamePage() {
       clearInterval(bgmTimerRef.current);
       bgmTimerRef.current = null;
     }
-    stageTimeoutRefs.current.forEach((t) => clearTimeout(t));
+    stageTimeoutRefs.current.forEach((t) => {
+      clearTimeout(t);
+      clearInterval(t);
+    });
     stageTimeoutRefs.current = [];
   }, []);
 
@@ -870,8 +880,14 @@ export default function DogGamePage() {
     setStage('caught');
     playSfx('caught');
 
-    // Sau 1.05s khi chú chó đã chạy tới sát bạn được chọn -> Mở màn Vinh danh (Giai đoạn 4)
-    const tCelebrate = setTimeout(() => {
+    // Sau 1.05s (tự động đóng băng tiến trình nếu tạm dừng / xoay dọc) khi chú chó đã chạy tới sát bạn được chọn -> Mở màn Vinh danh (Giai đoạn 4)
+    let elapsedCaughtMs = 0;
+    const tCelebrate = setInterval(() => {
+      if (stateRef.current.isPaused) return;
+      elapsedCaughtMs += 50;
+      if (elapsedCaughtMs < 1050) return;
+      clearInterval(tCelebrate);
+
       // Kiểm tra lại học sinh vẫn còn hợp lệ trong lớp
       const stillValid = (students ?? []).some((s) => s.id === chosen.id);
       if (!stillValid) {
@@ -912,9 +928,9 @@ export default function DogGamePage() {
       playSfx('fanfare');
 
       saveGamePick(classId, chosen, roundId).catch(() => {});
-    }, 1050);
+    }, 50);
 
-    stageTimeoutRefs.current.push(tCelebrate);
+    stageTimeoutRefs.current.push(tCelebrate as unknown as ReturnType<typeof setTimeout>);
   }, [students, classId, noRepeat, alreadyPickedIds, clearAllTimers, playSfx, spawnCelebrationConfetti, toast]);
 
   /**
@@ -2440,71 +2456,79 @@ export default function DogGamePage() {
   return (
     <div
       ref={containerRef}
-      className={`min-h-screen w-full bg-gradient-to-b from-sky-100 via-amber-50/70 to-pink-50 select-none relative overflow-x-hidden ${
-        isFullscreen || isPseudoFullscreen
-          ? 'fixed inset-0 z-40 w-screen h-[100dvh] overflow-hidden flex flex-col justify-between'
-          : isLandscape
-          ? 'p-1 flex flex-col justify-between h-[100dvh] overflow-hidden'
-          : 'p-2 sm:p-4 flex flex-col items-center justify-between'
+      className={`w-full bg-gradient-to-b from-sky-100 via-amber-50/70 to-pink-50 select-none overflow-hidden flex flex-col items-center justify-between ${
+        isFullscreen || isPseudoFullscreen || isLandscape
+          ? 'fixed inset-0 z-40 w-screen h-[100dvh] max-h-[100dvh]'
+          : 'min-h-[100dvh] h-[100dvh] max-h-[100dvh] relative p-2 sm:p-3'
       }`}
       style={{
-        paddingTop: isFullscreen || isPseudoFullscreen ? 'max(0.25rem, env(safe-area-inset-top))' : undefined,
-        paddingBottom: isFullscreen || isPseudoFullscreen ? 'max(0.25rem, env(safe-area-inset-bottom))' : undefined,
-        paddingLeft: isFullscreen || isPseudoFullscreen ? 'max(0.5rem, env(safe-area-inset-left))' : undefined,
-        paddingRight: isFullscreen || isPseudoFullscreen ? 'max(0.5rem, env(safe-area-inset-right))' : undefined,
+        paddingTop: 'max(0.25rem, env(safe-area-inset-top))',
+        paddingBottom: 'max(0.25rem, env(safe-area-inset-bottom))',
+        paddingLeft: 'max(0.5rem, env(safe-area-inset-left))',
+        paddingRight: 'max(0.5rem, env(safe-area-inset-right))',
       }}
     >
       {/* Lớp phủ bắt buộc xoay ngang trên điện thoại */}
-      {showRotateOverlay && <LandscapeRotateOverlay onTryLockLandscape={lockLandscape} />}
+      {showRotateOverlay && (
+        <LandscapeRotateOverlay
+          onEnterFullscreenAndLandscape={requestGameFullscreen}
+          onTryLockLandscape={lockLandscape}
+          isPausedMidGame={isPaused && isRunning}
+        />
+      )}
       {/* =====================================================================
           1. THANH ĐIỀU KHIỂN TRÊN CÙNG (TOP BAR)
          ===================================================================== */}
-      <header className="w-full max-w-6xl mx-auto bg-white/95 backdrop-blur-md rounded-2xl border-2 border-pink-200 shadow-soft px-3 sm:px-5 py-2.5 flex flex-wrap items-center justify-between gap-2 z-20">
-        <div className="flex items-center gap-2 sm:gap-3">
+      <header
+        className={`w-full max-w-6xl mx-auto shrink-0 bg-white/95 backdrop-blur-md rounded-xl sm:rounded-2xl border-2 border-pink-200 shadow-soft px-2.5 sm:px-4 flex items-center justify-between gap-1.5 sm:gap-2 z-20 ${
+          isCompactLandscape ? 'h-9 py-0.5 mb-0.5' : isLandscape ? 'h-10 py-1 mb-1' : 'py-1.5 sm:py-2 mb-1.5'
+        }`}
+      >
+        <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0">
           <button
             type="button"
-            className="btn-ghost btn-sm text-xs sm:text-sm h-9 px-2.5 font-bold text-ink hover:bg-pink-50"
+            className="btn-ghost btn-sm text-xs sm:text-sm h-7 sm:h-8 px-2 sm:px-2.5 font-bold text-ink hover:bg-pink-50 shrink-0"
             onClick={() => navigate('/games')}
           >
-            <ArrowLeft className="w-4 h-4 text-pink-600" />
+            <ArrowLeft className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-pink-600" />
             <span className="hidden sm:inline">Trò chơi</span>
           </button>
 
-          <div className="h-5 w-[1.5px] bg-pink-100 hidden sm:block" />
+          <div className="h-4 w-[1.5px] bg-pink-100 hidden sm:block shrink-0" />
 
-          <div className="flex items-center gap-2">
-            <span className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-white flex items-center justify-center shadow-sm">
-              <Dog className="w-5 h-5" />
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+            <span className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg sm:rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-white flex items-center justify-center shadow-sm shrink-0">
+              <Dog className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
             </span>
-            <div>
-              <h1 className="font-display font-black text-sm sm:text-base text-ink leading-tight">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <h1 className="font-display font-black text-xs sm:text-sm text-ink leading-tight truncate">
                 Chú chó đuổi bắt
               </h1>
-              <p className="text-[11px] font-bold text-pink-600">
-                Lớp {currentClass.name} • Đã gọi {validPickedCount}/{totalStudents} bạn
-              </p>
+              <span className="text-[10px] sm:text-[11px] font-bold text-pink-600 bg-pink-50 px-1.5 py-0.5 rounded-md border border-pink-100 truncate">
+                {currentClass.name} ({validPickedCount}/{totalStudents})
+              </span>
             </div>
           </div>
         </div>
 
         {/* Các công tắc cấu hình: Không lặp lại, Âm thanh, Nhạc nền, Lịch sử, Toàn màn hình */}
-        <div className="flex items-center flex-wrap gap-1.5 sm:gap-2.5">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           <label
-            className="flex items-center gap-1.5 text-xs sm:text-sm font-bold text-ink bg-pink-50/90 hover:bg-pink-100/80 px-2.5 py-1.5 rounded-xl border border-pink-200 cursor-pointer transition-colors"
+            className="flex items-center gap-1 text-[11px] sm:text-xs font-bold text-ink bg-pink-50/90 hover:bg-pink-100/80 px-2 py-1 rounded-lg sm:rounded-xl border border-pink-200 cursor-pointer transition-colors"
             title="Không gọi lặp lại học sinh trong cùng một vòng"
           >
             <input
               type="checkbox"
-              className="accent-pink-500 w-4 h-4 rounded cursor-pointer"
+              className="accent-pink-500 w-3.5 h-3.5 rounded cursor-pointer"
               checked={noRepeat}
               onChange={(e) => setNoRepeat(e.target.checked)}
             />
-            <span>Không lặp lại</span>
+            <span className="hidden sm:inline">Không lặp lại</span>
           </label>
 
           <button
             type="button"
-            className={`icon-btn h-9 w-9 rounded-xl border ${
+            className={`icon-btn h-7 w-7 sm:h-8 sm:w-8 rounded-lg sm:rounded-xl border ${
               soundEnabled
                 ? 'bg-amber-50 border-amber-200 text-amber-600'
                 : 'bg-slate-100 border-slate-200 text-slate-400'
@@ -2513,12 +2537,12 @@ export default function DogGamePage() {
             title={soundEnabled ? 'Tắt âm thanh hiệu ứng' : 'Bật âm thanh hiệu ứng'}
             aria-label="Âm thanh"
           >
-            {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+            {soundEnabled ? <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
           </button>
 
           <button
             type="button"
-            className={`icon-btn h-9 w-9 rounded-xl border ${
+            className={`icon-btn h-7 w-7 sm:h-8 sm:w-8 rounded-lg sm:rounded-xl border ${
               musicEnabled && soundEnabled
                 ? 'bg-pink-50 border-pink-200 text-pink-600'
                 : 'bg-slate-100 border-slate-200 text-slate-400'
@@ -2527,29 +2551,29 @@ export default function DogGamePage() {
             title={musicEnabled ? 'Tắt nhạc nền' : 'Bật nhạc nền'}
             aria-label="Nhạc nền"
           >
-            <Music className="w-4 h-4" />
+            <Music className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
           </button>
 
           <button
             type="button"
-            className="btn-outline btn-sm h-9 px-2.5 text-xs font-bold border-pink-200 text-pink-700 hover:bg-pink-50"
+            className="btn-outline btn-sm h-7 sm:h-8 px-2 text-[11px] sm:text-xs font-bold border-pink-200 text-pink-700 hover:bg-pink-50"
             onClick={() => setShowHistory(true)}
           >
-            <History className="w-4 h-4 text-pink-500" />
+            <History className="w-3.5 h-3.5 text-pink-500" />
             <span className="hidden md:inline">Lịch sử</span>
-            <span className="chip bg-pink-100 text-pink-700 px-1.5 py-0 text-[11px]">
+            <span className="chip bg-pink-100 text-pink-700 px-1.5 py-0 text-[10px] sm:text-[11px]">
               {picks?.length ?? 0}
             </span>
           </button>
 
           <button
             type="button"
-            className="icon-btn h-9 w-9 rounded-xl border border-pink-200 bg-white text-ink hover:bg-pink-50"
+            className="icon-btn h-7 w-7 sm:h-8 sm:w-8 rounded-lg sm:rounded-xl border border-pink-200 bg-white text-ink hover:bg-pink-50"
             onClick={handleToggleFullscreen}
             title={isFullscreen ? 'Thoát toàn màn hình' : 'Toàn màn hình'}
             aria-label="Toàn màn hình"
           >
-            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <Maximize2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
           </button>
         </div>
       </header>
@@ -2557,8 +2581,18 @@ export default function DogGamePage() {
       {/* =====================================================================
           2. KHU VỰC TRUNG TÂM: SÂN TRƯỜNG 2D CANVAS (GIỮ TỶ LỆ 1000:560)
          ===================================================================== */}
-      <main className="flex-1 flex items-center justify-center my-2 sm:my-3 w-full max-w-6xl mx-auto relative">
-        <div className="w-full aspect-[1000/560] max-h-[calc(100dvh-100px)] relative rounded-[26px] overflow-hidden border-2 sm:border-4 border-amber-300 shadow-soft bg-sky-200 flex items-center justify-center">
+      <main
+        ref={mainStageRef}
+        className="flex-1 min-h-0 flex items-center justify-center w-full max-w-6xl mx-auto relative overflow-hidden"
+      >
+        <div
+          className="aspect-[1000/560] max-w-full max-h-full relative rounded-[20px] sm:rounded-[26px] overflow-hidden border-2 sm:border-4 border-amber-300 shadow-soft bg-sky-200 flex items-center justify-center"
+          style={
+            stageSize
+              ? { width: `${stageSize.width}px`, height: `${stageSize.height}px` }
+              : { width: '100%', maxWidth: '1000px' }
+          }
+        >
           <canvas
             ref={canvasRef}
             width={1000}
@@ -2568,20 +2602,20 @@ export default function DogGamePage() {
 
           {/* Trường hợp lớp rỗng: Hiển thị thông báo thân thiện và nút dẫn tới trang thêm học sinh */}
           {totalStudents === 0 && (
-            <div className="absolute inset-0 bg-ink/45 backdrop-blur-sm flex items-center justify-center p-4 z-10">
-              <div className="bg-white rounded-3xl p-6 max-w-md w-full text-center border-2 border-pink-200 shadow-soft space-y-3 animate-pop">
-                <div className="w-14 h-14 rounded-2xl bg-pink-100 text-pink-600 flex items-center justify-center mx-auto">
-                  <Users className="w-8 h-8" />
+            <div className="absolute inset-0 bg-ink/45 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 z-10">
+              <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-md w-full text-center border-2 border-pink-200 shadow-soft space-y-2.5 animate-pop">
+                <div className="w-12 h-12 rounded-2xl bg-pink-100 text-pink-600 flex items-center justify-center mx-auto">
+                  <Users className="w-7 h-7" />
                 </div>
-                <h2 className="font-display font-black text-xl text-ink">
+                <h2 className="font-display font-black text-lg sm:text-xl text-ink">
                   Lớp chưa có học sinh nào
                 </h2>
-                <p className="text-sm text-ink-soft">
+                <p className="text-xs sm:text-sm text-ink-soft">
                   Hãy thêm danh sách học sinh vào lớp <strong>{currentClass.name}</strong> để các bạn cùng tham gia trò chơi Chú chó đuổi bắt nhé!
                 </p>
                 <button
                   type="button"
-                  className="btn-primary w-full justify-center py-2.5"
+                  className="btn-primary w-full justify-center py-2"
                   onClick={() => navigate('/students')}
                 >
                   <UserPlus className="w-4 h-4" /> Thêm học sinh ngay
@@ -2592,17 +2626,17 @@ export default function DogGamePage() {
 
           {/* Thông báo khi đang Tạm dừng */}
           {isPaused && isRunning && (
-            <div className="absolute inset-0 bg-ink/35 backdrop-blur-[2px] flex items-center justify-center p-4 z-10">
-              <div className="bg-white/95 rounded-3xl px-7 py-5 text-center border-2 border-amber-300 shadow-soft space-y-3 animate-pop">
-                <span className="chip bg-amber-100 text-amber-800 font-extrabold">
+            <div className="absolute inset-0 bg-ink/35 backdrop-blur-[2px] flex items-center justify-center p-3 z-10">
+              <div className="bg-white/95 rounded-3xl px-5 sm:px-7 py-4 text-center border-2 border-amber-300 shadow-soft space-y-2.5 animate-pop max-w-xs">
+                <span className="chip bg-amber-100 text-amber-800 font-extrabold text-xs">
                   ⏸ Đang tạm dừng trò chơi
                 </span>
-                <p className="text-sm text-ink-soft">
+                <p className="text-xs sm:text-sm text-ink-soft">
                   Mọi chuyển động và đồng hồ đếm ngược đang được giữ nguyên.
                 </p>
                 <button
                   type="button"
-                  className="btn-primary px-6 py-2.5 mx-auto"
+                  className="btn-primary px-6 py-2 mx-auto text-xs sm:text-sm"
                   onClick={handleTogglePause}
                 >
                   <Play className="w-4 h-4 fill-white" /> Tiếp tục ngay
@@ -2613,7 +2647,7 @@ export default function DogGamePage() {
 
           {/* Thông báo khi đã gọi hết học sinh trong vòng không lặp lại */}
           {stage === 'idle' && roundExhausted && totalStudents > 0 && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md px-5 py-3 rounded-2xl border-2 border-amber-300 shadow-soft flex flex-wrap items-center gap-3 z-10">
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md px-4 py-2 rounded-2xl border-2 border-amber-300 shadow-soft flex flex-wrap items-center gap-2.5 z-10 max-w-[92%]">
               <span className="text-xs sm:text-sm font-bold text-amber-900">
                 🎉 Cả lớp ({totalStudents} bạn) đều đã được gọi tên trong vòng này!
               </span>
@@ -2631,17 +2665,25 @@ export default function DogGamePage() {
               BẢNG VINH DANH HỌC SINH ĐƯỢC CHỌN (GIAI ĐOẠN 4 - GIỐNG HỆT PANEL 4)
              ================================================================= */}
           {stage === 'celebrate' && pickedStudent && (
-            <div className="absolute inset-0 flex items-center justify-center p-3 sm:p-6 pointer-events-auto z-10 animate-fadeIn">
-              <div className="relative bg-gradient-to-b from-amber-100 via-yellow-50 to-white rounded-[32px] border-4 border-amber-400 shadow-2xl max-w-sm w-full px-5 pt-9 pb-5 text-center animate-pop">
+            <div className="absolute inset-0 flex items-center justify-center p-2 sm:p-4 pointer-events-auto z-10 animate-fadeIn">
+              <div
+                className={`relative bg-gradient-to-b from-amber-100 via-yellow-50 to-white rounded-[24px] sm:rounded-[32px] border-3 sm:border-4 border-amber-400 shadow-2xl max-w-sm w-full text-center animate-pop max-h-[94%] overflow-y-auto ${
+                  isCompactLandscape ? 'px-4 pt-6 pb-3' : 'px-5 pt-8 pb-4'
+                }`}
+              >
                 {/* Dải ruy-băng đỏ hồng "Chúc mừng!" phía trên thẻ */}
-                <div className="absolute -top-6 left-1/2 -translate-x-1/2 bg-gradient-to-r from-rose-500 via-pink-500 to-rose-500 text-white font-display font-black text-xl sm:text-2xl px-8 py-2 rounded-full border-4 border-amber-200 shadow-lg flex items-center gap-2 whitespace-nowrap">
-                  <Sparkles className="w-5 h-5 text-yellow-200 animate-spin" />
+                <div className="inline-flex items-center gap-1.5 bg-gradient-to-r from-rose-500 via-pink-500 to-rose-500 text-white font-display font-black text-sm sm:text-xl px-5 sm:px-7 py-1 sm:py-1.5 rounded-full border-2 sm:border-4 border-amber-200 shadow-lg whitespace-nowrap mb-1">
+                  <Sparkles className="w-4 h-4 text-yellow-200 animate-spin" />
                   <span>Chúc mừng!</span>
-                  <Sparkles className="w-5 h-5 text-yellow-200 animate-spin" />
+                  <Sparkles className="w-4 h-4 text-yellow-200 animate-spin" />
                 </div>
 
                 {/* Hào quang và chân dung Chibi + Avatar học sinh */}
-                <div className="relative mx-auto w-32 h-32 sm:w-36 sm:h-36 flex items-center justify-center my-1">
+                <div
+                  className={`relative mx-auto flex items-center justify-center my-0.5 ${
+                    isCompactLandscape ? 'w-20 h-20' : 'w-28 h-28 sm:w-32 sm:h-32'
+                  }`}
+                >
                   <div className="absolute inset-0 rounded-full bg-gradient-to-tr from-amber-300/60 via-yellow-200/80 to-pink-200/60 animate-pulse" />
                   <img
                     src={
@@ -2650,23 +2692,25 @@ export default function DogGamePage() {
                         : ASSETS.boy.celebrate
                     }
                     alt={pickedStudent.fullName}
-                    className="relative w-28 h-28 sm:w-32 sm:h-32 object-contain drop-shadow-md"
+                    className={`relative object-contain drop-shadow-md ${
+                      isCompactLandscape ? 'w-18 h-18' : 'w-24 h-24 sm:w-28 sm:h-28'
+                    }`}
                   />
-                  <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-1 border-2 border-amber-300 shadow">
-                    <AnimalAvatarSVG avatarKey={pickedStudent.avatar} size={34} />
+                  <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-0.5 sm:p-1 border-2 border-amber-300 shadow">
+                    <AnimalAvatarSVG avatarKey={pickedStudent.avatar} size={isCompactLandscape ? 24 : 32} />
                   </div>
                 </div>
 
                 {/* Bảng tên trắng bo tròn chứa Họ tên đầy đủ & Mã học sinh thật */}
-                <div className="mt-3 bg-white rounded-2xl border-2 border-pink-200 px-4 py-3 shadow-inner">
+                <div className="mt-1.5 sm:mt-2.5 bg-white rounded-xl sm:rounded-2xl border-2 border-pink-200 px-3 py-1.5 sm:py-2.5 shadow-inner">
                   <h2
-                    className="font-display font-black text-xl sm:text-2xl text-purple-950 leading-snug"
+                    className="font-display font-black text-base sm:text-2xl text-purple-950 leading-snug truncate"
                     data-testid="picked-student-name"
                   >
                     {pickedStudent.fullName}
                   </h2>
                   <p
-                    className="text-xs sm:text-sm font-extrabold text-rose-600 mt-0.5 font-mono"
+                    className="text-[11px] sm:text-sm font-extrabold text-rose-600 mt-0.5 font-mono"
                     data-testid="picked-student-code"
                   >
                     Mã HS: {pickedStudent.code}
@@ -2674,17 +2718,17 @@ export default function DogGamePage() {
                 </div>
 
                 {/* Nút hành động: Chơi lại hoặc Lượt tiếp theo */}
-                <div className="mt-4 flex items-center gap-2.5">
+                <div className="mt-2.5 sm:mt-3.5 flex items-center gap-2">
                   <button
                     type="button"
-                    className="btn-outline flex-1 py-2.5 font-bold text-sm"
+                    className="btn-outline flex-1 py-1.5 sm:py-2 font-bold text-xs sm:text-sm min-h-[36px] sm:min-h-[42px]"
                     onClick={handleResetGame}
                   >
                     <RotateCcw className="w-4 h-4" /> Đặt lại
                   </button>
                   <button
                     type="button"
-                    className="btn-primary flex-1 py-2.5 font-extrabold text-sm bg-gradient-to-r from-pink-500 to-orange-500 border-0 text-white"
+                    className="btn-primary flex-1 py-1.5 sm:py-2 font-extrabold text-xs sm:text-sm min-h-[36px] sm:min-h-[42px] bg-gradient-to-r from-pink-500 to-orange-500 border-0 text-white"
                     onClick={handleStartGame}
                   >
                     <Play className="w-4 h-4 fill-white" /> Lượt tiếp theo
@@ -2699,15 +2743,19 @@ export default function DogGamePage() {
       {/* =====================================================================
           3. THANH ĐIỀU KHIỂN DƯỚI CÙNG (BOTTOM CONTROLS BAR)
          ===================================================================== */}
-      <footer className="w-full max-w-6xl mx-auto bg-white/95 backdrop-blur-md rounded-2xl border-2 border-pink-200 shadow-soft px-3 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2 z-20">
+      <footer
+        className={`w-full max-w-6xl mx-auto shrink-0 bg-white/95 backdrop-blur-md rounded-xl sm:rounded-2xl border-2 border-pink-200 shadow-soft px-2.5 sm:px-5 flex items-center justify-between gap-2 z-20 ${
+          isCompactLandscape ? 'py-1 mt-0.5' : 'py-1.5 sm:py-2 mt-1'
+        }`}
+      >
         {/* Trạng thái tiến trình trực quan */}
-        <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-ink-soft">
+        <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-bold text-ink-soft min-w-0 truncate">
           <span
-            className={`w-2.5 h-2.5 rounded-full ${
+            className={`w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full shrink-0 ${
               isRunning ? 'bg-emerald-500 animate-ping' : 'bg-amber-400'
             }`}
           />
-          <span>
+          <span className="truncate">
             {stage === 'idle' && 'Sẵn sàng: Bấm "Bắt đầu" để các bạn học sinh rón rén vào lớp!'}
             {stage === 'sneak' && 'Giai đoạn 1: Các bạn học sinh đang rón rén đi qua chú chó ngủ...'}
             {stage === 'alarm' && 'Giai đoạn 2: Ái chà! Có bạn làm rơi chồng sách khiến chú chó thức giấc!'}
@@ -2718,30 +2766,34 @@ export default function DogGamePage() {
         </div>
 
         {/* Các nút điều khiển lớn, rõ ràng */}
-        <div className="flex items-center flex-wrap gap-2 ml-auto">
+        <div className="flex items-center gap-1.5 sm:gap-2 ml-auto shrink-0">
           <button
             type="button"
-            className="btn-primary px-5 py-2.5 h-auto text-sm sm:text-base font-extrabold bg-gradient-to-r from-pink-500 to-amber-500 hover:from-pink-600 hover:to-amber-600 border-0 text-white shadow-sm"
+            className={`btn-primary font-extrabold bg-gradient-to-r from-pink-500 to-amber-500 hover:from-pink-600 hover:to-amber-600 border-0 text-white shadow-sm ${
+              isCompactLandscape ? 'px-3.5 py-1.5 h-8 text-xs' : 'px-4 sm:px-5 py-2 h-auto text-xs sm:text-sm'
+            }`}
             onClick={handleStartGame}
             disabled={isRunning || totalStudents === 0}
           >
-            <Play className="w-5 h-5 fill-white" />
+            <Play className="w-4 h-4 fill-white" />
             <span>{roundExhausted && noRepeat ? 'Bắt đầu vòng mới' : 'Bắt đầu'}</span>
           </button>
 
           {isRunning && (
             <button
               type="button"
-              className="btn-outline px-4 py-2.5 h-auto text-sm font-bold border-amber-300 text-amber-800 bg-amber-50 hover:bg-amber-100"
+              className={`btn-outline font-bold border-amber-300 text-amber-800 bg-amber-50 hover:bg-amber-100 ${
+                isCompactLandscape ? 'px-3 py-1 h-8 text-xs' : 'px-3.5 py-2 h-auto text-xs sm:text-sm'
+              }`}
               onClick={handleTogglePause}
             >
               {isPaused ? (
                 <>
-                  <Play className="w-4 h-4 fill-amber-700" /> Tiếp tục
+                  <Play className="w-3.5 h-3.5 fill-amber-700" /> Tiếp tục
                 </>
               ) : (
                 <>
-                  <Pause className="w-4 h-4" /> Tạm dừng
+                  <Pause className="w-3.5 h-3.5" /> Tạm dừng
                 </>
               )}
             </button>
@@ -2750,21 +2802,25 @@ export default function DogGamePage() {
           {stage === 'chase' && (
             <button
               type="button"
-              className="btn-outline px-4 py-2.5 h-auto text-sm font-bold border-pink-300 text-pink-700 bg-pink-50 hover:bg-pink-100"
+              className={`btn-outline font-bold border-pink-300 text-pink-700 bg-pink-50 hover:bg-pink-100 ${
+                isCompactLandscape ? 'px-3 py-1 h-8 text-xs' : 'px-3.5 py-2 h-auto text-xs sm:text-sm'
+              }`}
               onClick={finishChaseAndSelectStudent}
               title="Bỏ qua thời gian đếm ngược và chọn ngay học sinh"
             >
-              <FastForward className="w-4 h-4" /> Bỏ qua ({countdown}s)
+              <FastForward className="w-3.5 h-3.5" /> Bỏ qua ({countdown}s)
             </button>
           )}
 
           <button
             type="button"
-            className="btn-outline px-4 py-2.5 h-auto text-sm font-bold"
+            className={`btn-outline font-bold ${
+              isCompactLandscape ? 'px-3 py-1 h-8 text-xs' : 'px-3.5 py-2 h-auto text-xs sm:text-sm'
+            }`}
             onClick={handleResetGame}
             disabled={stage === 'idle' && !pickedStudent}
           >
-            <RotateCcw className="w-4 h-4" /> Chơi lại
+            <RotateCcw className="w-3.5 h-3.5" /> Chơi lại
           </button>
         </div>
       </footer>
