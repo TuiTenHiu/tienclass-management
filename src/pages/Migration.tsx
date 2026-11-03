@@ -11,6 +11,9 @@ import {
   RefreshCw,
   FileText,
   Upload,
+  RotateCcw,
+  History,
+  ShieldAlert,
 } from 'lucide-react';
 import { PageHeader } from '../components/ui';
 import { useToast } from '../components/ToastNotification';
@@ -18,11 +21,14 @@ import { useAuth } from '../state/AuthContext';
 import {
   buildMigrationPreview,
   createMigrationBackup,
-  executeMigration,
   getLastMigrationReport,
-  restoreIndexedDbFromBackup,
   validateMigrationBackup,
   verifyBackupRoundTrip,
+  getActiveImportSession,
+  resumeImportSession,
+  rollbackImportSession,
+  reconcileStaleImportSessions,
+  type ImportSessionState,
   type BackupValidationResult,
   type MigrationBackup,
   type MigrationGroup,
@@ -52,6 +58,20 @@ export default function MigrationPage() {
   const [progress, setProgress] = useState<MigrationProgress | null>(null);
   const [report, setReport] = useState<MigrationReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const [activeSession, setActiveSession] = useState<ImportSessionState | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(false);
+
+  const loadActiveSession = async () => {
+    setSessionLoading(true);
+    try {
+      const sess = await getActiveImportSession();
+      setActiveSession(sess);
+    } catch {
+      setActiveSession(null);
+    } finally {
+      setSessionLoading(false);
+    }
+  };
 
   useEffect(() => {
     getLastMigrationReport()
@@ -59,6 +79,7 @@ export default function MigrationPage() {
         if (rep) setReport(rep);
       })
       .catch(() => {});
+    loadActiveSession();
   }, []);
 
   const handleCreateBackup = async () => {
@@ -97,30 +118,8 @@ export default function MigrationPage() {
     }
   };
 
-  const handleRestoreFromFile = async (file: File | undefined) => {
-    if (!file) return;
-    if (
-      !window.confirm(
-        'CẢNH BÁO PHỤC HỒI DỮ LIỆU (KẾ HOẠCH B):\nThao tác này sẽ khôi phục dữ liệu IndexedDB từ bản sao lưu. Các bảng sẽ được đồng bộ chính xác về trạng thái lúc sao lưu.\n\nBạn có chắc chắn muốn thực hiện?'
-      )
-    ) {
-      return;
-    }
-    setBusy(true);
-    try {
-      const json = JSON.parse(await file.text());
-      const res = await restoreIndexedDbFromBackup(json);
-      if (res.ok) {
-        toast.success(res.message);
-        setPreview(null);
-      } else {
-        toast.error(res.message);
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Không thể đọc hoặc khôi phục file sao lưu.');
-    } finally {
-      setBusy(false);
-    }
+  const handleRestoreFromFile = async (_file: File | undefined) => {
+    toast.error('Chức năng phục hồi legacy database tạm thời bị khóa ở Bước 2.2 để bảo vệ toàn vẹn dữ liệu.');
   };
 
   const handlePreview = async () => {
@@ -135,32 +134,8 @@ export default function MigrationPage() {
   };
 
   const handleExecuteMigration = async () => {
-    if (!backup) {
-      toast.error('Vui lòng tạo bản sao lưu hợp lệ trước khi bắt đầu di trú.');
-      return;
-    }
-    if (!user || !profile || (profile.role !== 'teacher' && profile.role !== 'admin')) {
-      toast.error('Chỉ tài khoản giáo viên hoặc quản trị viên mới được phép di trú dữ liệu.');
-      return;
-    }
-
-    setBusy(true);
     setProgress(null);
-    try {
-      const rep = await executeMigration(backup, {
-        onProgress: (p) => setProgress(p),
-      });
-      setReport(rep);
-      if (rep.success) {
-        toast.success('Di trú dữ liệu Offline lên Supabase thành công và đã đối soát khớp 100%!');
-      } else {
-        toast.info(`Di trú hoàn tất nhưng có ${rep.conflicts.length} xung đột cần lưu ý.`);
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Lỗi trong quá trình di trú');
-    } finally {
-      setBusy(false);
-    }
+    toast.error('Chức năng di trú dữ liệu legacy lên Cloud tạm thời bị khóa ở Bước 2.2 để bảo vệ dữ liệu legacy.');
   };
 
   const handleDownloadReport = () => {
@@ -174,6 +149,73 @@ export default function MigrationPage() {
     URL.revokeObjectURL(url);
   };
 
+  const handleResumeSession = async () => {
+    if (!activeSession) return;
+    if (!backup?.checksum) {
+      toast.error('Vui lòng tạo hoặc kiểm tra file sao lưu để xác minh checksum trước khi phục hồi phiên.');
+      return;
+    }
+    setSessionLoading(true);
+    try {
+      const res = await resumeImportSession(activeSession.id, backup.checksum);
+      if (res.ok) {
+        toast.success(`Đã phục hồi phiên di trú thành công (lock v${res.lock_version ?? 1})`);
+        await loadActiveSession();
+      } else {
+        toast.error(res.error || 'Không thể phục hồi phiên');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Lỗi phục hồi phiên');
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  const handleRollbackSession = async () => {
+    if (!activeSession) return;
+    const confirmed = window.confirm(
+      'CẢNH BÁO AN TOÀN: Thao tác này sẽ hoàn tác dữ liệu đã nhập của phiên này theo thứ tự LIFO và bảo vệ dữ liệu đã tồn tại trước đó. Bạn có chắc chắn muốn thực hiện?',
+    );
+    if (!confirmed) return;
+
+    setSessionLoading(true);
+    try {
+      const res = await rollbackImportSession(activeSession.id, activeSession.leaseToken);
+      if (res.ok) {
+        toast.success('Đã hoàn tác phiên di trú an toàn.');
+        await loadActiveSession();
+      } else {
+        if (res.status === 'requires_manual_review') {
+          toast.error(`Rào cản an toàn kích hoạt: ${res.reason || 'Dữ liệu cần rà soát thủ công'}. Chuyển sang requires_manual_review.`);
+        } else {
+          toast.error(res.error || res.message || 'Không thể rollback phiên');
+        }
+        await loadActiveSession();
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Lỗi hoàn tác phiên');
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  const handleReconcileStale = async () => {
+    setSessionLoading(true);
+    try {
+      const res = await reconcileStaleImportSessions();
+      if (res.ok) {
+        toast.success(`Đã quét đối soát: cập nhật ${res.updated_count ?? 0} phiên hết hạn`);
+        await loadActiveSession();
+      } else {
+        toast.error(res.error || 'Lỗi quét đối soát phiên hết hạn');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Lỗi quét đối soát phiên hết hạn');
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
   const isTeacherOrAdmin = Boolean(user && profile && (profile.role === 'teacher' || profile.role === 'admin'));
   const canStartMigration = Boolean(backup && backupCheck?.ok && preview && isTeacherOrAdmin && !busy);
 
@@ -183,6 +225,17 @@ export default function MigrationPage() {
         title="Di trú dữ liệu Offline lên Supabase"
         description="Sao lưu, kiểm tra khả năng khôi phục, xem trước và di trú có kiểm soát lên Supabase Local kèm đối soát (Giai đoạn A–D)."
       />
+
+      <div className="card p-4 flex items-start gap-3 border border-amber-300 bg-amber-50 text-sm text-amber-900 rounded-2xl">
+        <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+        <div className="space-y-1">
+          <p className="font-bold">BẢO VỆ DỮ LIỆU BƯỚC 2.2 — TẠM DỪNG DI TRÚ TỪ DATABASE LEGACY</p>
+          <p>
+            Hệ thống đang hoạt động với kiến trúc cơ sở dữ liệu riêng biệt theo từng tài khoản. Toàn bộ database legacy <code className="bg-amber-100 px-1 py-0.5 rounded font-mono text-xs font-bold">pink-classroom</code> được bảo toàn nguyên trạng và tạm thời khóa thao tác ghi/di trú từ giao diện để ngăn ngừa rủi ro trộn lẫn dữ liệu giữa các tài khoản.
+          </p>
+          <p className="text-xs text-amber-700">Quy trình nhập dữ liệu legacy có kiểm soát sẽ được kích hoạt tại Bước 2.3.</p>
+        </div>
+      </div>
 
       <div className="card p-4 flex items-start gap-3 border border-pink-200 bg-pink-50/50 text-sm">
         <ShieldCheck className="w-5 h-5 text-pink-600 shrink-0 mt-0.5" />
@@ -391,6 +444,125 @@ export default function MigrationPage() {
               />
             </div>
           </div>
+        )}
+      </section>
+
+      {/* Giai đoạn 2.6: Quản lý Phiên Di Trú & Rollback An Toàn */}
+      <section className="card p-5 space-y-4 border border-pink-200">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-pink-100 pb-3">
+          <div className="flex items-center gap-2">
+            <History className="w-5 h-5 text-pink-600" />
+            <h3 className="font-display font-bold text-base text-ink">
+              Quản lý Phiên Di Trú & Rollback An Toàn (Giai đoạn 2.6)
+            </h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className="btn-outline btn-sm"
+              onClick={handleReconcileStale}
+              disabled={sessionLoading}
+              title="Quét và đánh dấu failed cho các phiên hết hạn lease"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${sessionLoading ? 'animate-spin' : ''}`} /> Quét phiên hết hạn
+            </button>
+            <button
+              className="btn-outline btn-sm"
+              onClick={loadActiveSession}
+              disabled={sessionLoading}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${sessionLoading ? 'animate-spin' : ''}`} /> Tải lại
+            </button>
+          </div>
+        </div>
+
+        {activeSession ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+              <div className="p-3 bg-pink-50/50 rounded-xl border border-pink-100">
+                <span className="text-ink-soft">Mã phiên (Session ID):</span>
+                <p className="font-mono font-bold text-ink mt-0.5 truncate">{activeSession.id}</p>
+              </div>
+              <div className="p-3 bg-pink-50/50 rounded-xl border border-pink-100">
+                <span className="text-ink-soft">Trạng thái (Status):</span>
+                <p className="mt-0.5">
+                  <span
+                    className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+                      activeSession.status === 'committed'
+                        ? 'bg-mint/30 text-mint-dark'
+                        : activeSession.status === 'in_progress'
+                        ? 'bg-blue-100 text-blue-800'
+                        : activeSession.status === 'rolled_back'
+                        ? 'bg-purple-100 text-purple-800'
+                        : activeSession.status === 'requires_manual_review'
+                        ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                        : 'bg-red-100 text-red-800'
+                    }`}
+                  >
+                    {activeSession.status.toUpperCase()}
+                  </span>
+                </p>
+              </div>
+              <div className="p-3 bg-pink-50/50 rounded-xl border border-pink-100">
+                <span className="text-ink-soft">Lock Version / Lease:</span>
+                <p className="font-mono font-semibold text-ink mt-0.5">
+                  v{activeSession.lockVersion} · {new Date(activeSession.leaseExpiresAt).toLocaleTimeString('vi-VN')}
+                </p>
+              </div>
+              <div className="p-3 bg-pink-50/50 rounded-xl border border-pink-100">
+                <span className="text-ink-soft">Bản sao lưu Checksum:</span>
+                <p className="font-mono text-ink mt-0.5 truncate" title={activeSession.backupChecksum}>
+                  {activeSession.backupChecksum.slice(0, 16)}...
+                </p>
+              </div>
+            </div>
+
+            {activeSession.status === 'requires_manual_review' && (
+              <div className="card p-3.5 flex items-start gap-3 border border-amber-300 bg-amber-50 text-xs text-amber-900 rounded-xl">
+                <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-bold text-sm text-amber-950">YÊU CẦU ĐỐI SOÁT THỦ CÔNG (REQUIRES MANUAL REVIEW)</p>
+                  <p>
+                    Rào cản an toàn Cloud kích hoạt: {activeSession.lastErrorMessage || 'Phát hiện dữ liệu phụ thuộc hoặc liên kết phụ huynh ngoài phiên.'}
+                  </p>
+                  <p className="text-amber-700">
+                    Giai đoạn rà soát ({activeSession.lastErrorStage || 'barrier'}): Rollback tự động bị từ chối để tránh xóa nhầm dữ liệu liên đới.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {activeSession.status === 'rolled_back' && (
+              <div className="card p-3 flex items-center gap-2 border border-purple-200 bg-purple-50 text-xs text-purple-900 rounded-xl">
+                <CheckCircle2 className="w-4 h-4 text-purple-600 shrink-0" />
+                <span>Phiên đã hoàn tất rollback an toàn. Toàn bộ dữ liệu được hoàn tác có kiểm chứng, bảo vệ 100% bản ghi liên kết có sẵn.</span>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-2 pt-2">
+              {(activeSession.status === 'in_progress' || activeSession.status === 'failed') && (
+                <>
+                  <button
+                    className="btn-outline btn-sm text-blue-700 border-blue-300 hover:bg-blue-50"
+                    onClick={handleResumeSession}
+                    disabled={sessionLoading}
+                  >
+                    <RefreshCw className="w-4 h-4" /> Tiếp tục phiên (Resume)
+                  </button>
+                  <button
+                    className="btn-outline btn-sm text-danger border-red-300 hover:bg-red-50"
+                    onClick={handleRollbackSession}
+                    disabled={sessionLoading}
+                  >
+                    <RotateCcw className="w-4 h-4 text-danger" /> Hoàn tác an toàn (Rollback LIFO)
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-ink-soft">
+            Chưa có phiên di trú nào được ghi nhận cho tài khoản của bạn trên Cloud ledger.
+          </p>
         )}
       </section>
 

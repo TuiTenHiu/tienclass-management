@@ -3,12 +3,75 @@ import { FileSpreadsheet, Download, Upload, AlertCircle, AlertTriangle, CheckCir
 import { Modal } from '../../components/Modal';
 import { useToast } from '../../components/ToastNotification';
 import { AnimalAvatarSVG } from '../../components/avatars';
-import { db } from '../../data/db';
+import { LEGACY_DB_NAME, type PinkDB } from '../../data/db';
 import { bulkAddStudents } from '../../data/repo';
 import { downloadTemplate, parseStudentFile, type ImportResult, REQUIRED_HEADERS } from '../../lib/excel';
+import { useApp } from '../../state/AppContext';
+import type { Student } from '../../types';
+
+export interface ExistingStudentsImportContext {
+  existingCodes: Set<string>;
+  existingInClass: Student[];
+  nextCodeStart: number;
+}
+
+/**
+ * Đọc danh sách mã học sinh hiện có và chỉ số mã HSxxx kế tiếp trên đúng database của tài khoản đã xác thực.
+ * Tuyệt đối không truy cập hoặc fallback về database legacy ('pink-classroom').
+ */
+export async function loadImportStudentContext(
+  userDb: PinkDB | null | undefined,
+  classId: string,
+): Promise<ExistingStudentsImportContext> {
+  if (!userDb || userDb.name === LEGACY_DB_NAME) {
+    throw new Error('Cơ sở dữ liệu tài khoản chưa sẵn sàng hoặc không hợp lệ.');
+  }
+  const all = await userDb.students.toArray();
+  const existingCodes = new Set(all.map((s) => s.code.toUpperCase()));
+  let max = 0;
+  all.forEach((s) => {
+    const m = /^HS(\d+)$/i.exec(s.code);
+    if (m) max = Math.max(max, Number(m[1]));
+  });
+  return {
+    existingCodes,
+    existingInClass: all.filter((s) => s.classId === classId),
+    nextCodeStart: max + 1,
+  };
+}
+
+/**
+ * Phân tích file Excel/CSV học sinh dựa trên dữ liệu học sinh của đúng tài khoản hiện hành.
+ */
+export async function parseStudentFileForDatabase(
+  userDb: PinkDB | null | undefined,
+  file: File,
+  classId: string,
+): Promise<ImportResult> {
+  const ctx = await loadImportStudentContext(userDb, classId);
+  return parseStudentFile(
+    file,
+    ctx.existingCodes,
+    ctx.existingInClass,
+    ctx.nextCodeStart,
+  );
+}
+
+function useSafeUserDb(): PinkDB | null {
+  try {
+    const app = useApp();
+    if (!app?.db || app.db.name === LEGACY_DB_NAME) {
+      return null;
+    }
+    return app.db;
+  } catch {
+    return null;
+  }
+}
 
 export function ImportExcelModal({ open, onClose, classId, className }: { open: boolean; onClose: () => void; classId: string; className: string }) {
   const toast = useToast();
+  const userDb = useSafeUserDb();
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState('');
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -24,22 +87,15 @@ export function ImportExcelModal({ open, onClose, classId, className }: { open: 
 
   const onFile = async (f: File | undefined) => {
     if (!f) return;
+    if (!userDb) {
+      toast.error('Cơ sở dữ liệu tài khoản chưa sẵn sàng');
+      if (fileRef.current) fileRef.current.value = '';
+      return;
+    }
     setParsing(true);
     setFileName(f.name);
     try {
-      const all = await db.students.toArray();
-      const codes = new Set(all.map((s) => s.code.toUpperCase()));
-      let max = 0;
-      all.forEach((s) => {
-        const m = /^HS(\d+)$/i.exec(s.code);
-        if (m) max = Math.max(max, Number(m[1]));
-      });
-      const r = await parseStudentFile(
-        f,
-        codes,
-        all.filter((s) => s.classId === classId),
-        max + 1,
-      );
+      const r = await parseStudentFileForDatabase(userDb, f, classId);
       setResult(r);
     } catch {
       toast.error('Không đọc được file');
@@ -56,6 +112,10 @@ export function ImportExcelModal({ open, onClose, classId, className }: { open: 
 
   const confirm = async () => {
     if (!toSave.length) return;
+    if (!userDb) {
+      toast.error('Cơ sở dữ liệu tài khoản chưa sẵn sàng');
+      return;
+    }
     setSaving(true);
     try {
       const n = await bulkAddStudents(

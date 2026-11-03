@@ -40,6 +40,7 @@ export default function PointsPage() {
 
   // Modal quản lý tiêu chí
   const [critModalOpen, setCritModalOpen] = useState(false);
+  const [mobileCriteriaOpen, setMobileCriteriaOpen] = useState(false);
   const [editingCrit, setEditingCrit] = useState<Criterion | null>(null);
   const [critForm, setCritForm] = useState({ name: '', points: 2, type: 'reward' as 'reward' | 'penalty', icon: 'star' });
 
@@ -84,6 +85,7 @@ export default function PointsPage() {
         }
       );
       setSelectedIds(new Set());
+      setMobileCriteriaOpen(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Lỗi khi cộng điểm');
     }
@@ -133,24 +135,24 @@ export default function PointsPage() {
   return (
     <div className="animate-fadeIn space-y-6">
       <PageHeader
-        title={`Thi đua & Điểm thưởng: Lớp ${currentClass.name}`}
+        title={`Thi đua: Lớp ${currentClass.name}`}
         description="Ghi nhận thành tích tích cực, khuyến khích học sinh thi đua học tập."
         actions={
-          <div className="flex gap-2">
+          <div className="grid grid-cols-3 sm:flex gap-1.5 sm:gap-2 w-full sm:w-auto">
             <button
-              className={`btn ${tab === 'award' ? 'btn-primary' : 'btn-outline'}`}
+              className={`btn ${tab === 'award' ? 'btn-primary' : 'btn-outline'} text-xs sm:text-sm px-2 sm:px-4`}
               onClick={() => setTab('award')}
             >
               <Award className="w-4 h-4" /> Chấm điểm
             </button>
             <button
-              className={`btn ${tab === 'history' ? 'btn-primary' : 'btn-outline'}`}
+              className={`btn ${tab === 'history' ? 'btn-primary' : 'btn-outline'} text-xs sm:text-sm px-2 sm:px-4`}
               onClick={() => setTab('history')}
             >
               <History className="w-4 h-4" /> Lịch sử ({txs?.length ?? 0})
             </button>
             <button
-              className="btn-secondary"
+              className="btn-secondary text-xs sm:text-sm px-2 sm:px-4"
               onClick={() => {
                 setEditingCrit(null);
                 setCritForm({ name: '', points: 2, type: 'reward', icon: 'star' });
@@ -167,17 +169,17 @@ export default function PointsPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Cột 1 & 2: Danh sách học sinh chọn để cộng điểm */}
           <div className="lg:col-span-2 space-y-4">
-            <div className="card p-4 flex items-center justify-between">
-              <span className="font-semibold text-sm">
-                Đã chọn: <b className="text-pink-600">{selectedIds.size}</b> / {students?.length ?? 0} học sinh
+            <div className="card p-3 sm:p-4 flex items-center justify-between gap-2">
+              <span className="font-semibold text-xs sm:text-sm">
+                Đã chọn: <b className="text-pink-600">{selectedIds.size}</b> / {students?.length ?? 0} bạn
               </span>
-              <div className="flex gap-2">
-                <button className="btn-secondary btn-sm" onClick={selectAll}>
+              <div className="flex gap-1.5 sm:gap-2">
+                <button className="btn-secondary btn-sm text-xs sm:text-sm" onClick={selectAll}>
                   {selectedIds.size === students?.length ? 'Bỏ chọn cả lớp' : 'Chọn cả lớp'}
                 </button>
                 {selectedIds.size > 0 && (
-                  <button className="btn-ghost btn-sm" onClick={() => setSelectedIds(new Set())}>
-                    Xóa chọn
+                  <button className="btn-ghost btn-sm text-xs sm:text-sm" onClick={() => setSelectedIds(new Set())}>
+                    Xóa
                   </button>
                 )}
               </div>
@@ -190,7 +192,7 @@ export default function PointsPage() {
                 <EmptyState illustration="bunny-star" title="Lớp chưa có học sinh" />
               </div>
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 sm:gap-3">
                 {students.map((s) => {
                   const isSel = selectedIds.has(s.id);
                   const pts = studentPoints.get(s.id) ?? 0;
@@ -199,7 +201,7 @@ export default function PointsPage() {
                       type="button"
                       key={s.id}
                       onClick={() => toggleSelect(s.id)}
-                      className={`card p-3 flex flex-col items-center text-center relative transition-all duration-150 hover:-translate-y-0.5 ${
+                      className={`card p-2.5 sm:p-3 flex flex-col items-center text-center relative transition-all duration-150 active:scale-95 ${
                         isSel ? 'border-pink-500 ring-4 ring-pink-100 bg-pink-50/70' : 'hover:border-pink-200'
                       }`}
                     >
@@ -216,9 +218,9 @@ export default function PointsPage() {
                       </span>
 
                       <div className="mt-2">
-                        <StudentAvatar student={s} size={48} />
+                        <StudentAvatar student={s} size={44} />
                       </div>
-                      <span className="font-semibold text-sm mt-2 line-clamp-1">{s.fullName}</span>
+                      <span className="font-semibold text-[13.5px] sm:text-sm mt-1.5 line-clamp-1 w-full">{s.fullName}</span>
                       <span className="text-[11px] text-ink-soft">{s.code}</span>
                     </button>
                   );
@@ -227,9 +229,9 @@ export default function PointsPage() {
             )}
           </div>
 
-          {/* Cột 3: Bảng tiêu chí để bấm thưởng/phạt */}
-          <div className="space-y-4">
-            <div className="card p-4 space-y-4">
+          {/* Cột 3: Bảng tiêu chí để bấm thưởng/phạt trên Desktop */}
+          <div className="space-y-4 hidden lg:block">
+            <div className="card p-4 space-y-4 sticky top-20">
               <h3 className="font-display font-extrabold text-base flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-pink-500" />
                 Tiêu chí khen thưởng
@@ -275,6 +277,23 @@ export default function PointsPage() {
               </div>
             </div>
           </div>
+
+          {/* Floating Action Bar trên Mobile khi đã chọn học sinh (Một tay chọn nhanh) */}
+          {selectedIds.size > 0 && (
+            <div className="fixed bottom-16 left-3 right-3 z-30 lg:hidden bg-white/95 backdrop-blur-md p-2.5 rounded-2xl border border-pink-200 shadow-card flex items-center justify-between gap-3 animate-fadeIn">
+              <div className="text-xs font-semibold pl-1">
+                <span>Đã chọn: <b className="text-pink-600 font-bold">{selectedIds.size}</b> bạn</span>
+              </div>
+              <button
+                type="button"
+                className="btn-primary !min-h-[40px] text-xs font-bold px-4 shadow-soft"
+                onClick={() => setMobileCriteriaOpen(true)}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Trao điểm / Nhắc nhở
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         /* Tab Lịch sử giao dịch */
@@ -288,69 +307,168 @@ export default function PointsPage() {
               description="Các lượt cộng/trừ điểm sẽ được lưu chi tiết kèm thời gian tại đây."
             />
           ) : (
-            <div className="overflow-x-auto scroll-soft p-2">
-              <table className="table-base min-w-[700px]">
-                <thead>
-                  <tr>
-                    <th>Thời gian</th>
-                    <th>Học sinh</th>
-                    <th>Tiêu chí</th>
-                    <th>Điểm</th>
-                    <th>Người thực hiện</th>
-                    <th>Trạng thái</th>
-                    <th className="text-right">Hành động</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {txs.map((t) => {
-                    const st = students?.find((s) => s.id === t.studentId);
-                    return (
-                      <tr key={t.id} className={t.undone ? 'opacity-40 line-through' : ''}>
-                        <td className="text-sm text-ink-soft">{formatDateTimeVN(t.createdAt)}</td>
-                        <td>
-                          <div className="flex items-center gap-2">
-                            {st && <StudentAvatar student={st} size={28} />}
-                            <span className="font-semibold">{st?.fullName ?? 'Học sinh'}</span>
-                          </div>
-                        </td>
-                        <td>{t.criterionName}</td>
-                        <td>
-                          <span
-                            className={`chip font-bold ${
-                              t.delta > 0 ? 'bg-mint text-mint-dark' : 'bg-danger-soft text-danger'
-                            }`}
-                          >
-                            {t.delta > 0 ? `+${t.delta}` : t.delta}
+            <>
+              {/* Lịch sử dạng Card trên Mobile */}
+              <div className="p-3 space-y-2.5 block md:hidden">
+                {txs.map((t) => {
+                  const st = students?.find((s) => s.id === t.studentId);
+                  return (
+                    <div
+                      key={t.id}
+                      className={`card p-3 space-y-2 border-pink-100 ${
+                        t.undone ? 'opacity-40 line-through bg-pink-50/50' : 'bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          {st && <StudentAvatar student={st} size={32} />}
+                          <span className="font-semibold text-[14px] text-ink truncate">
+                            {st?.fullName ?? 'Học sinh'}
                           </span>
-                        </td>
-                        <td className="text-sm">{t.actor}</td>
-                        <td>
-                          {t.undone ? (
-                            <span className="chip bg-pink-100 text-ink-soft">Đã hoàn tác</span>
-                          ) : (
-                            <span className="chip bg-mint/50 text-mint-dark">Hợp lệ</span>
-                          )}
-                        </td>
-                        <td className="text-right">
-                          {!t.undone && (
-                            <button
-                              className="btn-ghost btn-sm"
-                              onClick={() => handleUndoTx(t.id)}
-                              data-tip="Hoàn tác lượt cộng này"
+                        </div>
+                        <span
+                          className={`chip font-bold text-xs shrink-0 ${
+                            t.delta > 0 ? 'bg-mint text-mint-dark' : 'bg-danger-soft text-danger'
+                          }`}
+                        >
+                          {t.delta > 0 ? `+${t.delta}` : t.delta}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-ink-soft">
+                        <span className="font-medium text-ink">{t.criterionName}</span>
+                        <span>{formatDateTimeVN(t.createdAt)}</span>
+                      </div>
+                      {!t.undone && (
+                        <div className="pt-1 flex justify-end">
+                          <button
+                            type="button"
+                            className="btn-ghost btn-sm text-xs text-pink-700 !min-h-[30px]"
+                            onClick={() => handleUndoTx(t.id)}
+                          >
+                            <Undo2 className="w-3 h-3" /> Hoàn tác
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Lịch sử dạng Table trên Desktop */}
+              <div className="overflow-x-auto scroll-soft p-2 hidden md:block">
+                <table className="table-base min-w-[700px]">
+                  <thead>
+                    <tr>
+                      <th>Thời gian</th>
+                      <th>Học sinh</th>
+                      <th>Tiêu chí</th>
+                      <th>Điểm</th>
+                      <th>Người thực hiện</th>
+                      <th>Trạng thái</th>
+                      <th className="text-right">Hành động</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {txs.map((t) => {
+                      const st = students?.find((s) => s.id === t.studentId);
+                      return (
+                        <tr key={t.id} className={t.undone ? 'opacity-40 line-through' : ''}>
+                          <td className="text-sm text-ink-soft">{formatDateTimeVN(t.createdAt)}</td>
+                          <td>
+                            <div className="flex items-center gap-2">
+                              {st && <StudentAvatar student={st} size={28} />}
+                              <span className="font-semibold">{st?.fullName ?? 'Học sinh'}</span>
+                            </div>
+                          </td>
+                          <td>{t.criterionName}</td>
+                          <td>
+                            <span
+                              className={`chip font-bold ${
+                                t.delta > 0 ? 'bg-mint text-mint-dark' : 'bg-danger-soft text-danger'
+                              }`}
                             >
-                              <Undo2 className="w-3.5 h-3.5" /> Hoàn tác
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                              {t.delta > 0 ? `+${t.delta}` : t.delta}
+                            </span>
+                          </td>
+                          <td className="text-sm">{t.actor}</td>
+                          <td>
+                            {t.undone ? (
+                              <span className="chip bg-pink-100 text-ink-soft">Đã hoàn tác</span>
+                            ) : (
+                              <span className="chip bg-mint/50 text-mint-dark">Hợp lệ</span>
+                            )}
+                          </td>
+                          <td className="text-right">
+                            {!t.undone && (
+                              <button
+                                className="btn-ghost btn-sm"
+                                onClick={() => handleUndoTx(t.id)}
+                                data-tip="Hoàn tác lượt cộng này"
+                              >
+                                <Undo2 className="w-3.5 h-3.5" /> Hoàn tác
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}
+
+      {/* Modal chọn tiêu chí trên Mobile dạng Bottom Sheet */}
+      <Modal
+        open={mobileCriteriaOpen}
+        onClose={() => setMobileCriteriaOpen(false)}
+        title={`Chấm điểm cho ${selectedIds.size} bạn`}
+        subtitle="Chọn tiêu chí khen thưởng hoặc nhắc nhở bên dưới"
+      >
+        <div className="space-y-4 py-1">
+          <h4 className="font-display font-bold text-sm text-ink flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-pink-500" /> Tiêu chí khen thưởng
+          </h4>
+          <div className="grid grid-cols-1 gap-2">
+            {criteria
+              ?.filter((c) => c.type === 'reward')
+              .map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => handleAward(c)}
+                  className="w-full card p-3 flex items-center justify-between border-mint-dark/20 hover:bg-mint/30 active:scale-98 transition text-left"
+                >
+                  <span className="font-semibold text-sm">{c.name}</span>
+                  <span className="chip bg-mint text-mint-dark font-bold">
+                    +{c.points}
+                  </span>
+                </button>
+              ))}
+          </div>
+
+          <h4 className="font-display font-bold text-sm text-ink flex items-center gap-2 pt-2 border-t border-pink-100">
+            <AlertTriangle className="w-4 h-4 text-danger" /> Nhắc nhở & trừ điểm
+          </h4>
+          <div className="grid grid-cols-1 gap-2">
+            {criteria
+              ?.filter((c) => c.type === 'penalty')
+              .map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => handleAward(c)}
+                  className="w-full card p-3 flex items-center justify-between border-danger/20 hover:bg-danger-soft/40 active:scale-98 transition text-left"
+                >
+                  <span className="font-semibold text-sm">{c.name}</span>
+                  <span className="chip bg-danger-soft text-danger font-bold">
+                    {c.points}
+                  </span>
+                </button>
+              ))}
+          </div>
+        </div>
+      </Modal>
 
       {/* Modal Quản lý Tiêu chí */}
       <Modal

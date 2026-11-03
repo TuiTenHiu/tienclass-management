@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useLiveQuery } from 'dexie-react-hooks';
 import { Plus, Pencil, Trash2, Users, CheckCircle2, CalendarRange, UserRound, StickyNote, Loader2 } from 'lucide-react';
 import { useApp } from '../state/AppContext';
-import { db } from '../data/db';
+import { useStudentStatusCountsByClass } from '../state/hooks';
 import { CLASS_COLORS, createClass, deleteClass, updateClass, ValidationError, type ClassInput } from '../data/repo';
 import { PageHeader, Field } from '../components/ui';
 import { Modal } from '../components/Modal';
@@ -140,16 +139,7 @@ export default function ClassesPage() {
   const [editing, setEditing] = useState<ClassRoom | null>(null);
   const [deleting, setDeleting] = useState<ClassRoom | null>(null);
 
-  const counts = useLiveQuery(async () => {
-    const all = await db.students.toArray();
-    const m = new Map<string, { active: number; archived: number }>();
-    all.forEach((s) => {
-      const c = m.get(s.classId) ?? { active: 0, archived: 0 };
-      c[s.status] += 1;
-      m.set(s.classId, c);
-    });
-    return m;
-  }, []);
+  const counts = useStudentStatusCountsByClass();
 
   useEffect(() => {
     if (params.get('new') === '1') {

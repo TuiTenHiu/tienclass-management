@@ -2,28 +2,65 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { Pencil, Cake, Phone, UserRound, StickyNote, Star, CalendarCheck, MessageSquareHeart } from 'lucide-react';
 import { Modal } from '../../components/Modal';
 import { StudentAvatar } from '../../components/StudentAvatar';
-import { db } from '../../data/db';
+import { LEGACY_DB_NAME, type PinkDB } from '../../data/db';
 import { summarizeAttendance } from '../../lib/stats';
 import { formatDateTimeVN, formatDateVN } from '../../lib/utils';
-import type { Student } from '../../types';
+import { useApp } from '../../state/AppContext';
+import type { PointTransaction, Student, StudentComment } from '../../types';
+
+export interface StudentProfileSummary {
+  points: number;
+  recentTx: PointTransaction[];
+  att: ReturnType<typeof summarizeAttendance>;
+  comments: StudentComment[];
+}
+
+/**
+ * Truy vấn dữ liệu tổng hợp hồ sơ học sinh trên đúng database của tài khoản giáo viên hiện hành.
+ * Tuyệt đối không truy cập hoặc fallback về database legacy ('pink-classroom').
+ */
+export async function queryStudentProfileData(
+  userDb: PinkDB | null | undefined,
+  student: Student | null | undefined,
+): Promise<StudentProfileSummary | null> {
+  if (!student || !userDb || userDb.name === LEGACY_DB_NAME) {
+    return null;
+  }
+  const [txs, att, comments] = await Promise.all([
+    userDb.transactions.where('studentId').equals(student.id).toArray(),
+    userDb.attendance.where('studentId').equals(student.id).toArray(),
+    userDb.comments.where('studentId').equals(student.id).toArray(),
+  ]);
+  const inClass = txs
+    .filter((t) => t.classId === student.classId && !t.undone)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return {
+    points: inClass.reduce((s, t) => s + t.delta, 0),
+    recentTx: inClass.slice(0, 5),
+    att: summarizeAttendance(att.filter((a) => a.classId === student.classId)),
+    comments: comments.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3),
+  };
+}
+
+function useSafeUserDb(): PinkDB | null {
+  try {
+    const app = useApp();
+    if (!app?.db || app.db.name === LEGACY_DB_NAME) {
+      return null;
+    }
+    return app.db;
+  } catch {
+    return null;
+  }
+}
 
 /** Hồ sơ học sinh – chỉ đọc, không thay đổi dữ liệu khi mở */
 export function StudentProfileModal({ student, onClose, onEdit, className }: { student: Student | null; onClose: () => void; onEdit: (s: Student) => void; className: string }) {
-  const data = useLiveQuery(async () => {
-    if (!student) return null;
-    const [txs, att, comments] = await Promise.all([
-      db.transactions.where('studentId').equals(student.id).toArray(),
-      db.attendance.where('studentId').equals(student.id).toArray(),
-      db.comments.where('studentId').equals(student.id).toArray(),
-    ]);
-    const inClass = txs.filter((t) => t.classId === student.classId && !t.undone).sort((a, b) => b.createdAt - a.createdAt);
-    return {
-      points: inClass.reduce((s, t) => s + t.delta, 0),
-      recentTx: inClass.slice(0, 5),
-      att: summarizeAttendance(att.filter((a) => a.classId === student.classId)),
-      comments: comments.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3),
-    };
-  }, [student?.id, student?.classId]);
+  const userDb = useSafeUserDb();
+  const data = useLiveQuery(
+    () => queryStudentProfileData(userDb, student),
+    [userDb, student?.id, student?.classId],
+  );
 
   if (!student) return null;
   const G: Record<string, string> = { male: 'Nam', female: 'Nữ', other: 'Khác', '': 'Không ghi' };

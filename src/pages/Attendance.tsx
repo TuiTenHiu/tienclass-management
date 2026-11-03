@@ -132,64 +132,75 @@ export default function AttendancePage() {
       />
 
       {/* Date & Session Selector Bar */}
-      <div className="card p-4 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-1 bg-pink-100/70 p-1 rounded-btn">
-            <button
-              className="icon-btn w-8 h-8"
-              onClick={() => setDate(addDays(date, -1))}
-              aria-label="Ngày trước"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <input
-              type="date"
-              className="bg-transparent font-semibold text-[14.5px] px-2 outline-none cursor-pointer"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-            />
-            <button
-              className="icon-btn w-8 h-8"
-              onClick={() => setDate(addDays(date, 1))}
-              aria-label="Ngày sau"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
+      <div className="card p-3 sm:p-4 space-y-3">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div className="flex items-center justify-between sm:justify-start gap-2">
+            <div className="flex items-center gap-1 bg-pink-100/70 p-1 rounded-btn">
+              <button
+                className="icon-btn w-9 h-9 sm:w-8 sm:h-8"
+                onClick={() => setDate(addDays(date, -1))}
+                aria-label="Ngày trước"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <input
+                type="date"
+                className="bg-transparent font-semibold text-[14px] sm:text-[14.5px] px-1 sm:px-2 outline-none cursor-pointer"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+              <button
+                className="icon-btn w-9 h-9 sm:w-8 sm:h-8"
+                onClick={() => setDate(addDays(date, 1))}
+                aria-label="Ngày sau"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1 bg-pink-100/70 p-1 rounded-btn">
+              <button
+                className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition ${
+                  session === 'morning' ? 'bg-white text-pink-600 shadow-sm' : 'text-ink-soft hover:text-ink'
+                }`}
+                onClick={() => setSession('morning')}
+              >
+                Sáng
+              </button>
+              <button
+                className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition ${
+                  session === 'afternoon' ? 'bg-white text-pink-600 shadow-sm' : 'text-ink-soft hover:text-ink'
+                }`}
+                onClick={() => setSession('afternoon')}
+              >
+                Chiều
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-1 bg-pink-100/70 p-1 rounded-btn">
-            <button
-              className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition ${
-                session === 'morning' ? 'bg-white text-pink-600 shadow-sm' : 'text-ink-soft hover:text-ink'
-              }`}
-              onClick={() => setSession('morning')}
-            >
-              Buổi Sáng
+          <div className="flex items-center gap-2 sm:hidden">
+            <button className="btn-secondary btn-sm flex-1" onClick={setAllPresent}>
+              <CheckCheck className="w-3.5 h-3.5" /> Cả lớp có mặt
             </button>
-            <button
-              className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition ${
-                session === 'afternoon' ? 'bg-white text-pink-600 shadow-sm' : 'text-ink-soft hover:text-ink'
-              }`}
-              onClick={() => setSession('afternoon')}
-            >
-              Buổi Chiều
+            <button className="btn-primary btn-sm flex-1" onClick={handleSave} disabled={saving || !students?.length}>
+              <Save className="w-3.5 h-3.5" /> {saving ? 'Lưu...' : 'Lưu'}
             </button>
           </div>
         </div>
 
         {/* Quick summary chips */}
-        <div className="flex items-center gap-2 text-sm">
-          <span className="chip bg-mint text-mint-dark">
+        <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 text-xs sm:text-sm pt-2 border-t border-pink-100/60">
+          <span className="chip bg-mint text-mint-dark justify-center sm:justify-start">
             <CheckCircle2 className="w-3.5 h-3.5" /> Có mặt: {currentSummary.present}
           </span>
-          <span className="chip bg-cream text-cream-dark">
+          <span className="chip bg-cream text-cream-dark justify-center sm:justify-start">
             <Clock className="w-3.5 h-3.5" /> Đi muộn: {currentSummary.late}
           </span>
-          <span className="chip bg-pink-100 text-pink-600">
-            <HelpCircle className="w-3.5 h-3.5" /> Nghỉ có phép: {currentSummary.excused}
+          <span className="chip bg-pink-100 text-pink-600 justify-center sm:justify-start">
+            <HelpCircle className="w-3.5 h-3.5" /> Nghỉ phép: {currentSummary.excused}
           </span>
-          <span className="chip bg-danger-soft text-danger">
-            <AlertCircle className="w-3.5 h-3.5" /> Không phép: {currentSummary.unexcused}
+          <span className="chip bg-danger-soft text-danger justify-center sm:justify-start">
+            <AlertCircle className="w-3.5 h-3.5" /> K.phép: {currentSummary.unexcused}
           </span>
         </div>
       </div>
@@ -206,95 +217,195 @@ export default function AttendancePage() {
           />
         </div>
       ) : (
-        <div className="card overflow-hidden">
-          <div className="overflow-x-auto scroll-soft p-2">
-            <table className="table-base min-w-[700px]">
-              <thead>
-                <tr>
-                  <th className="w-12">STT</th>
-                  <th>Học sinh</th>
-                  <th>Mã HS</th>
-                  <th className="text-center">Trạng thái điểm danh</th>
-                  <th>Ghi chú</th>
-                </tr>
-              </thead>
-              <tbody>
-                {students.map((s, idx) => {
-                  const state = localMap.get(s.id) ?? { status: 'present', note: '' };
-                  return (
-                    <tr key={s.id} className="hover:bg-pink-50/50">
-                      <td className="text-ink-soft">{idx + 1}</td>
-                      <td>
-                        <div className="flex items-center gap-3">
-                          <StudentAvatar student={s} size={36} />
-                          <span className="font-semibold text-ink">{s.fullName}</span>
-                        </div>
-                      </td>
-                      <td className="font-mono text-sm text-ink-soft">{s.code}</td>
-                      <td>
-                        <div className="flex items-center justify-center gap-1">
-                          <button
-                            type="button"
-                            className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
-                              state.status === 'present'
-                                ? 'bg-mint-dark text-white'
-                                : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
-                            }`}
-                            onClick={() => setStudentStatus(s.id, 'present')}
-                          >
-                            Có mặt
-                          </button>
-                          <button
-                            type="button"
-                            className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
-                              state.status === 'late'
-                                ? 'bg-cream-dark text-white'
-                                : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
-                            }`}
-                            onClick={() => setStudentStatus(s.id, 'late')}
-                          >
-                            Đi muộn
-                          </button>
-                          <button
-                            type="button"
-                            className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
-                              state.status === 'excused'
-                                ? 'bg-pink-500 text-white'
-                                : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
-                            }`}
-                            onClick={() => setStudentStatus(s.id, 'excused')}
-                          >
-                            Có phép
-                          </button>
-                          <button
-                            type="button"
-                            className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
-                              state.status === 'unexcused'
-                                ? 'bg-danger text-white'
-                                : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
-                            }`}
-                            onClick={() => setStudentStatus(s.id, 'unexcused')}
-                          >
-                            Không phép
-                          </button>
-                        </div>
-                      </td>
-                      <td>
-                        <input
-                          type="text"
-                          placeholder="Lý do nghỉ / ghi chú..."
-                          className="input h-8 text-[13px] px-2.5 max-w-[200px]"
-                          value={state.note}
-                          onChange={(e) => setStudentNote(s.id, e.target.value)}
-                        />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        <>
+          {/* Giao diện Thẻ danh sách thân thiện trên Mobile (Một tay chạm nhanh) */}
+          <div className="space-y-3 block md:hidden">
+            {students.map((s, idx) => {
+              const state = localMap.get(s.id) ?? { status: 'present', note: '' };
+              return (
+                <div key={s.id} className="card p-3.5 space-y-3 border-pink-100">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-6 h-6 rounded-full bg-pink-100 text-pink-700 text-xs font-bold inline-flex items-center justify-center shrink-0">
+                        {idx + 1}
+                      </span>
+                      <StudentAvatar student={s} size={40} />
+                      <div className="min-w-0">
+                        <p className="font-semibold text-ink text-[15px] truncate">{s.fullName}</p>
+                        <p className="font-mono text-xs text-ink-soft">{s.code}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 4 nút trạng thái điểm danh touch-friendly */}
+                  <div className="grid grid-cols-4 gap-1.5">
+                    <button
+                      type="button"
+                      className={`h-10 rounded-xl text-xs font-bold transition flex items-center justify-center ${
+                        state.status === 'present'
+                          ? 'bg-mint-dark text-white shadow-sm ring-2 ring-mint'
+                          : 'bg-pink-50 text-ink hover:bg-pink-100'
+                      }`}
+                      onClick={() => setStudentStatus(s.id, 'present')}
+                    >
+                      Có mặt
+                    </button>
+                    <button
+                      type="button"
+                      className={`h-10 rounded-xl text-xs font-bold transition flex items-center justify-center ${
+                        state.status === 'late'
+                          ? 'bg-cream-dark text-white shadow-sm ring-2 ring-cream-dark'
+                          : 'bg-pink-50 text-ink hover:bg-pink-100'
+                      }`}
+                      onClick={() => setStudentStatus(s.id, 'late')}
+                    >
+                      Đi muộn
+                    </button>
+                    <button
+                      type="button"
+                      className={`h-10 rounded-xl text-xs font-bold transition flex items-center justify-center ${
+                        state.status === 'excused'
+                          ? 'bg-pink-500 text-white shadow-sm ring-2 ring-pink-300'
+                          : 'bg-pink-50 text-ink hover:bg-pink-100'
+                      }`}
+                      onClick={() => setStudentStatus(s.id, 'excused')}
+                    >
+                      Có phép
+                    </button>
+                    <button
+                      type="button"
+                      className={`h-10 rounded-xl text-xs font-bold transition flex items-center justify-center ${
+                        state.status === 'unexcused'
+                          ? 'bg-danger text-white shadow-sm ring-2 ring-danger-soft'
+                          : 'bg-pink-50 text-ink hover:bg-pink-100'
+                      }`}
+                      onClick={() => setStudentStatus(s.id, 'unexcused')}
+                    >
+                      K.phép
+                    </button>
+                  </div>
+
+                  {/* Ghi chú nhanh cho học sinh nếu cần */}
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="Lý do nghỉ / ghi chú..."
+                      className="input !min-h-[38px] text-[13.5px] px-3 py-1.5 bg-pink-50/50"
+                      value={state.note}
+                      onChange={(e) => setStudentNote(s.id, e.target.value)}
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </div>
+
+          {/* Giao diện Bảng truyền thống trên Máy tính */}
+          <div className="card overflow-hidden hidden md:block">
+            <div className="overflow-x-auto scroll-soft p-2">
+              <table className="table-base min-w-[700px]">
+                <thead>
+                  <tr>
+                    <th className="w-12">STT</th>
+                    <th>Học sinh</th>
+                    <th>Mã HS</th>
+                    <th className="text-center">Trạng thái điểm danh</th>
+                    <th>Ghi chú</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {students.map((s, idx) => {
+                    const state = localMap.get(s.id) ?? { status: 'present', note: '' };
+                    return (
+                      <tr key={s.id} className="hover:bg-pink-50/50">
+                        <td className="text-ink-soft">{idx + 1}</td>
+                        <td>
+                          <div className="flex items-center gap-3">
+                            <StudentAvatar student={s} size={36} />
+                            <span className="font-semibold text-ink">{s.fullName}</span>
+                          </div>
+                        </td>
+                        <td className="font-mono text-sm text-ink-soft">{s.code}</td>
+                        <td>
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              type="button"
+                              className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
+                                state.status === 'present'
+                                  ? 'bg-mint-dark text-white'
+                                  : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
+                              }`}
+                              onClick={() => setStudentStatus(s.id, 'present')}
+                            >
+                              Có mặt
+                            </button>
+                            <button
+                              type="button"
+                              className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
+                                state.status === 'late'
+                                  ? 'bg-cream-dark text-white'
+                                  : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
+                              }`}
+                              onClick={() => setStudentStatus(s.id, 'late')}
+                            >
+                              Đi muộn
+                            </button>
+                            <button
+                              type="button"
+                              className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
+                                state.status === 'excused'
+                                  ? 'bg-pink-500 text-white'
+                                  : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
+                              }`}
+                              onClick={() => setStudentStatus(s.id, 'excused')}
+                            >
+                              Có phép
+                            </button>
+                            <button
+                              type="button"
+                              className={`px-2.5 py-1 text-[13px] font-semibold rounded-lg transition ${
+                                state.status === 'unexcused'
+                                  ? 'bg-danger text-white'
+                                  : 'bg-pink-50 text-ink-soft hover:bg-pink-100'
+                              }`}
+                              onClick={() => setStudentStatus(s.id, 'unexcused')}
+                            >
+                              Không phép
+                            </button>
+                          </div>
+                        </td>
+                        <td>
+                          <input
+                            type="text"
+                            placeholder="Lý do nghỉ / ghi chú..."
+                            className="input h-8 text-[13px] px-2.5 max-w-[200px]"
+                            value={state.note}
+                            onChange={(e) => setStudentNote(s.id, e.target.value)}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Thanh Lưu điểm danh Nổi trên Mobile (Floating Action Bar) */}
+          <div className="fixed bottom-16 left-3 right-3 z-30 md:hidden bg-white/95 backdrop-blur-md p-2.5 rounded-2xl border border-pink-200 shadow-card flex items-center justify-between gap-3 animate-fadeIn">
+            <div className="text-xs font-semibold pl-1">
+              <span>Có mặt: <b className="text-mint-dark">{currentSummary.present}</b>/{students.length}</span>
+            </div>
+            <button
+              className="btn-primary !min-h-[38px] text-xs font-bold px-4"
+              onClick={handleSave}
+              disabled={saving}
+            >
+              <Save className="w-3.5 h-3.5" />
+              {saving ? 'Đang lưu...' : 'Lưu điểm danh'}
+            </button>
+          </div>
+        </>
       )}
     </div>
   );

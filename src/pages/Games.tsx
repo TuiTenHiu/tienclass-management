@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { Dog, Sparkles, Play, History, Users, RefreshCw } from 'lucide-react';
+import { Dog, Rocket, Sparkles, Play, History, Users, RefreshCw } from 'lucide-react';
 import { useApp } from '../state/AppContext';
 import { useStudents, useGamePicks } from '../state/hooks';
 import { PageHeader } from '../components/ui';
@@ -31,17 +31,17 @@ export default function GamesPage() {
         description="Các hoạt động minigame vui nhộn tạo không khí hứng khởi trong giờ học."
       />
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Game Card: Chú chó tinh nghịch */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {/* Game Card 1: Chú chó đuổi bắt */}
         <div className="card overflow-hidden flex flex-col justify-between border-2 border-pink-200 hover:border-pink-300 transition-all shadow-card hover:shadow-soft">
-          <div className="bg-gradient-to-br from-pink-100 via-pink-50 to-cream p-6 relative overflow-hidden">
+          <div className="bg-gradient-to-br from-pink-100 via-amber-50 to-pink-50 p-6 relative overflow-hidden">
             <div className="absolute right-2 top-2 opacity-15">
               <Dog className="w-32 h-32 text-pink-600" />
             </div>
-            <span className="chip bg-pink-500 text-white font-bold mb-3">Minigame 2D Canvas</span>
-            <h3 className="font-display font-black text-2xl text-ink">Chú chó tinh nghịch</h3>
+            <span className="chip bg-pink-500 text-white font-bold mb-3">Minigame 2D Kawaii</span>
+            <h3 className="font-display font-black text-2xl text-ink">Chú chó đuổi bắt</h3>
             <p className="text-sm text-ink-soft mt-1 max-w-sm">
-              Mô phỏng sân trường hoạt hình vui nhộn. Chú chó thức dậy đuổi theo ngẫu nhiên một bạn học sinh trong lớp để gọi tên lên bảng!
+              Mô phỏng sân trường tiểu học hoạt hình 2D sinh động. Học sinh rón rén vào lớp, sự cố rơi sách đánh thức chú chó Corgi đáng yêu rượt đuổi sôi động để chọn bạn lên bảng!
             </p>
           </div>
 
@@ -51,13 +51,46 @@ export default function GamesPage() {
                 <Users className="w-4 h-4 text-pink-500" /> {students?.length ?? 0} học sinh sẵn sàng
               </span>
               <span className="flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4 text-cream-dark" /> Chọn ngẫu nhiên công bằng
+                <Sparkles className="w-4 h-4 text-amber-500" /> Chọn ngẫu nhiên công bằng
               </span>
             </div>
 
             <button
-              className="btn-primary w-full py-3 h-auto text-base"
+              className="btn-primary w-full py-3 h-auto text-base bg-gradient-to-r from-pink-500 to-amber-500 hover:from-pink-600 hover:to-amber-600 text-white"
               onClick={() => navigate('/games/dog')}
+              disabled={!students?.length}
+            >
+              <Play className="w-5 h-5 fill-white" /> Bắt đầu trò chơi
+            </button>
+          </div>
+        </div>
+
+        {/* Game Card 2: UFO gắp học sinh */}
+        <div className="card overflow-hidden flex flex-col justify-between border-2 border-indigo-200 hover:border-cyan-300 transition-all shadow-card hover:shadow-soft">
+          <div className="bg-gradient-to-br from-indigo-100 via-sky-50 to-amber-50 p-6 relative overflow-hidden">
+            <div className="absolute right-2 top-2 opacity-15">
+              <Rocket className="w-32 h-32 text-indigo-600" />
+            </div>
+            <span className="chip bg-indigo-600 text-white font-bold mb-3">Minigame 2D Canvas</span>
+            <h3 className="font-display font-black text-2xl text-ink">UFO gắp học sinh</h3>
+            <p className="text-sm text-ink-soft mt-1 max-w-sm">
+              Mô phỏng đĩa bay UFO ngoài không gian hạ cánh xuống sân trường tiểu học. UFO quét tia sáng kỳ ảo và hút ngẫu nhiên một bạn học sinh lên đĩa bay để gọi tên!
+            </p>
+          </div>
+
+          <div className="p-6 bg-white space-y-4">
+            <div className="flex items-center gap-4 text-sm text-ink-soft">
+              <span className="flex items-center gap-1.5">
+                <Users className="w-4 h-4 text-indigo-500" /> {students?.length ?? 0} học sinh sẵn sàng
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Sparkles className="w-4 h-4 text-amber-500" /> Chọn ngẫu nhiên công bằng
+              </span>
+            </div>
+
+            <button
+              className="btn-primary w-full py-3 h-auto text-base bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white"
+              onClick={() => navigate('/games/ufo')}
               disabled={!students?.length}
             >
               <Play className="w-5 h-5 fill-white" /> Bắt đầu trò chơi

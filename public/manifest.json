@@ -1,0 +1,31 @@
+{
+  "name": "TienClass - Lớp học hạnh phúc",
+  "short_name": "TienClass",
+  "description": "TienClass - Lớp học hạnh phúc, mỗi ngày một niềm vui",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FDF2F8",
+  "theme_color": "#FDF2F8",
+  "lang": "vi",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

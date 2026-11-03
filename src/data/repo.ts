@@ -1,4 +1,4 @@
-import { db, ALL_TABLES } from './db';
+import { db as legacyDb, ALL_TABLES, PinkDB, LEGACY_DB_NAME } from './db';
 import type {
   ActivityLog,
   AppSettings,
@@ -30,6 +30,137 @@ import {
   uuidv4,
 } from '../lib/utils';
 import { supabase } from '../lib/supabaseClient';
+import type { User } from '@supabase/supabase-js';
+
+/* =========================================================
+ * Dynamic User Database Resolution (Giai đoạn 2.2 & 2.3B-2)
+ * Cho phép repository chỉ ghi/đọc dữ liệu vào database riêng
+ * của tài khoản giáo viên đã xác thực.
+ * Cố định ngữ cảnh (database, userId, sessionVersion) chống race condition.
+ * ========================================================= */
+
+let activeDatabase: PinkDB | null = null;
+let activeUserId: string | null = null;
+let activeSessionVersion = 0;
+
+export function setActiveDatabase(database: PinkDB | null, userId?: string | null): void {
+  const nextUserId = userId ?? null;
+  // Nếu database instance và userId không thay đổi, không tăng sessionVersion
+  // để tránh làm hủy nhầm các tác vụ đồng bộ nền đang chạy của chính phiên làm việc này.
+  if (activeDatabase === database && activeUserId === nextUserId) {
+    return;
+  }
+  activeDatabase = database;
+  activeUserId = nextUserId;
+  activeSessionVersion++;
+  if (!database) {
+    invalidateAuthenticatedContextCache();
+  }
+}
+
+export function getActiveDatabase(): PinkDB | null {
+  return activeDatabase;
+}
+
+export function getActiveUserId(): string | null {
+  return activeUserId;
+}
+
+export function getActiveSessionVersion(): number {
+  return activeSessionVersion;
+}
+
+export interface OperationScope {
+  db: PinkDB;
+  userId: string | null;
+  sessionVersion: number;
+  assertActive: () => void;
+}
+
+/**
+ * Cố định database và danh tính người dùng cho toàn bộ vòng đời của một thao tác.
+ * Không tra lại dynamic proxy sau mỗi lệnh await, ngăn race condition ghi nhầm sang tài khoản khác.
+ */
+export function getOperationScope(targetDb?: PinkDB): OperationScope {
+  if (targetDb) {
+    if (targetDb.name === LEGACY_DB_NAME) {
+      const env = typeof globalThis !== 'undefined' ? (globalThis as unknown as { process?: { env?: Record<string, string> } }).process?.env : undefined;
+      if (!env || env.NODE_ENV !== 'test' || env.STRICT_USER_DB) {
+        throw new Error('Cảnh báo an toàn: Thao tác không được phép thực thi trên database legacy "pink-classroom".');
+      }
+    }
+    const boundDb = targetDb;
+    const boundUserId = activeUserId;
+    const boundVersion = activeSessionVersion;
+    return {
+      db: boundDb,
+      userId: boundUserId,
+      sessionVersion: boundVersion,
+      assertActive: () => {
+        if (activeDatabase && boundDb !== activeDatabase) {
+          throw new Error('Phiên làm việc đã thay đổi. Thao tác đã bị hủy an toàn để bảo vệ dữ liệu.');
+        }
+      },
+    };
+  }
+
+  if (activeDatabase) {
+    if (activeDatabase.name === LEGACY_DB_NAME) {
+      throw new Error('Cảnh báo an toàn: Thao tác không được phép thực thi trên database legacy "pink-classroom".');
+    }
+    const boundDb = activeDatabase;
+    const boundUserId = activeUserId;
+    const boundVersion = activeSessionVersion;
+    return {
+      db: boundDb,
+      userId: boundUserId,
+      sessionVersion: boundVersion,
+      assertActive: () => {
+        // Chỉ hủy bỏ khi database thực sự bị đóng/thay đổi hoặc người dùng thực sự đã chuyển đổi danh tính/đăng xuất
+        if (
+          activeDatabase !== boundDb ||
+          activeUserId !== boundUserId
+        ) {
+          throw new Error('Phiên làm việc đã thay đổi hoặc đã đăng xuất. Thao tác đã bị hủy an toàn để bảo vệ dữ liệu.');
+        }
+      },
+    };
+  }
+
+  // Môi trường test cũ không có explicit activeDatabase (legacy unit tests)
+  const env = typeof globalThis !== 'undefined' ? (globalThis as unknown as { process?: { env?: Record<string, string> } }).process?.env : undefined;
+  if (env?.NODE_ENV === 'test' && !env?.STRICT_USER_DB) {
+    const boundDb = legacyDb;
+    const boundVersion = activeSessionVersion;
+    return {
+      db: boundDb,
+      userId: null,
+      sessionVersion: boundVersion,
+      assertActive: () => {
+        if (activeDatabase !== null || activeSessionVersion !== boundVersion) {
+          throw new Error('Phiên làm việc đã thay đổi. Thao tác đã bị hủy an toàn.');
+        }
+      },
+    };
+  }
+
+  throw new Error('Chưa thiết lập database người dùng hoặc phiên đăng nhập chưa hợp lệ.');
+}
+
+export function getRepoDb(): PinkDB {
+  return getOperationScope().db;
+}
+
+export const currentDbProxy = new Proxy({} as PinkDB, {
+  get(_target, prop) {
+    const targetDb = getRepoDb();
+    const value = (targetDb as any)[prop];
+    if (typeof value === 'function') {
+      return value.bind(targetDb);
+    }
+    return value;
+  },
+});
 
 /* =========================================================
  * Repository: lớp trung gian duy nhất ghi/đọc dữ liệu.
@@ -53,7 +184,7 @@ interface CloudSyncedIdsRecord {
   parentLinkIds: string[];
 }
 
-export type PendingSyncItem =
+export type PendingSyncItem = (
   | {
       key: string;
       kind: 'attendance_upsert';
@@ -87,7 +218,13 @@ export type PendingSyncItem =
       kind: 'comment_delete';
       commentId: string;
       createdAt: number;
-    };
+    }
+) & {
+  userId?: string;
+  retryCount?: number;
+  lastError?: string;
+  status?: 'pending' | 'failed_auth' | 'quarantined';
+};
 
 export interface AuthenticatedContext {
   userId: string;
@@ -98,7 +235,7 @@ export interface AuthenticatedContext {
   avatarUrl?: string | null;
 }
 
-function isNetworkOrOfflineError(err: unknown): boolean {
+export function isNetworkOrOfflineError(err: unknown): boolean {
   if (!err) return false;
   const code = (err as { code?: string })?.code;
   if (code === 'NETWORK_ERROR' || code === 'FETCH_ERROR') return true;
@@ -115,24 +252,84 @@ function isNetworkOrOfflineError(err: unknown): boolean {
   );
 }
 
-export async function getPendingSyncQueue(): Promise<PendingSyncItem[]> {
-  const row = await db.kv.get(PENDING_SYNC_QUEUE_KEY);
+export function isAuthOrPermissionError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as { code?: string; status?: number; statusCode?: number; message?: string };
+  if (anyErr.status === 401 || anyErr.status === 403 || anyErr.statusCode === 401 || anyErr.statusCode === 403) {
+    return true;
+  }
+  if (anyErr.code === '42501' || anyErr.code === 'PGRST301' || anyErr.code === '401' || anyErr.code === '403') {
+    return true;
+  }
+  const msg = (anyErr.message ? String(anyErr.message) : err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('jwt') ||
+    msg.includes('token') ||
+    msg.includes('unauthorized') ||
+    msg.includes('forbidden') ||
+    msg.includes('permission') ||
+    msg.includes('not allowed') ||
+    msg.includes('row-level security') ||
+    msg.includes('rls') ||
+    msg.includes('không có quyền') ||
+    msg.includes('access denied') ||
+    msg.includes('invalid claim')
+  );
+}
+
+export async function verifyCurrentSupabaseSessionUser(expectedUserId: string | null): Promise<boolean> {
+  if (!supabase) return false;
+  if (!expectedUserId) return false;
+  try {
+    const { data, error } = await supabase.auth.getSession();
+    if (error || !data?.session?.user) return false;
+    return data.session.user.id === expectedUserId;
+  } catch {
+    return false;
+  }
+}
+
+function isLegacyTestMode(): boolean {
+  const env =
+    typeof globalThis !== 'undefined'
+      ? (globalThis as unknown as { process?: { env?: Record<string, string> } }).process?.env
+      : undefined;
+  return env?.NODE_ENV === 'test' && !env?.STRICT_USER_DB && activeDatabase === null;
+}
+
+export async function getPendingSyncQueue(targetDb?: PinkDB): Promise<PendingSyncItem[]> {
+  const scope = getOperationScope(targetDb);
+  const row = await scope.db.kv.get(PENDING_SYNC_QUEUE_KEY);
   return Array.isArray(row?.value) ? (row.value as PendingSyncItem[]) : [];
 }
 
-export async function savePendingSyncQueue(items: PendingSyncItem[]): Promise<void> {
-  await db.kv.put({ key: PENDING_SYNC_QUEUE_KEY, value: items });
+export async function savePendingSyncQueue(items: PendingSyncItem[], targetDb?: PinkDB): Promise<void> {
+  const scope = getOperationScope(targetDb);
+  await scope.db.kv.put({ key: PENDING_SYNC_QUEUE_KEY, value: items });
 }
 
-async function enqueuePendingSyncItem(item: PendingSyncItem): Promise<void> {
-  const cur = await getPendingSyncQueue();
+async function enqueuePendingSyncItem(
+  item: PendingSyncItem,
+  targetDb?: PinkDB,
+  authorUserId?: string,
+): Promise<void> {
+  const scope = getOperationScope(targetDb);
+  const cur = await getPendingSyncQueue(scope.db);
   const filtered = cur.filter((x) => x.key !== item.key);
-  filtered.push(item);
-  await savePendingSyncQueue(filtered);
+  const boundUserId = item.userId ?? authorUserId ?? scope.userId ?? undefined;
+  const boundItem: PendingSyncItem = {
+    ...item,
+    userId: boundUserId,
+    retryCount: item.retryCount ?? 0,
+    status: item.status ?? 'pending',
+  };
+  filtered.push(boundItem);
+  await savePendingSyncQueue(filtered, scope.db);
 }
 
-async function getCloudSyncedRecord(): Promise<CloudSyncedIdsRecord> {
-  const row = await db.kv.get(CLOUD_SYNC_KV_KEY);
+async function getCloudSyncedRecord(targetDb?: PinkDB): Promise<CloudSyncedIdsRecord> {
+  const scope = getOperationScope(targetDb);
+  const row = await scope.db.kv.get(CLOUD_SYNC_KV_KEY);
   const val = row?.value as Partial<CloudSyncedIdsRecord> | undefined;
   return {
     userId: val?.userId ?? null,
@@ -146,8 +343,9 @@ async function getCloudSyncedRecord(): Promise<CloudSyncedIdsRecord> {
   };
 }
 
-async function saveCloudSyncedRecord(rec: CloudSyncedIdsRecord): Promise<void> {
-  await db.kv.put({
+async function saveCloudSyncedRecord(rec: CloudSyncedIdsRecord, targetDb?: PinkDB): Promise<void> {
+  const scope = getOperationScope(targetDb);
+  await scope.db.kv.put({
     key: CLOUD_SYNC_KV_KEY,
     value: {
       userId: rec.userId,
@@ -173,8 +371,12 @@ export async function trackCloudIds(
     commentIds?: string[];
     parentLinkIds?: string[];
   },
+  targetDb?: PinkDB,
 ) {
-  const cur = await getCloudSyncedRecord();
+  const scope = getOperationScope(targetDb);
+  scope.assertActive();
+  const cur = await getCloudSyncedRecord(scope.db);
+  scope.assertActive();
   await saveCloudSyncedRecord({
     userId,
     classIds: [...cur.classIds, ...(patch.classIds ?? [])],
@@ -184,30 +386,57 @@ export async function trackCloudIds(
     transactionIds: [...cur.transactionIds, ...(patch.transactionIds ?? [])],
     commentIds: [...cur.commentIds, ...(patch.commentIds ?? [])],
     parentLinkIds: [...cur.parentLinkIds, ...(patch.parentLinkIds ?? [])],
-  });
+  }, scope.db);
+}
+
+let cachedAuthContext: { ctx: AuthenticatedContext; timestamp: number } | null = null;
+
+export function invalidateAuthenticatedContextCache(): void {
+  cachedAuthContext = null;
 }
 
 /**
  * Lấy thông tin phiên đăng nhập và hồ sơ phân quyền từ bảng public.profiles.
  * Trả về null nếu người dùng đang dùng chế độ Offline (chưa đăng nhập Supabase).
+ * Tối ưu hóa: Sử dụng in-memory cache (TTL 15s) tránh gửi lặp lại nhiều query đến Supabase.
  */
-export async function getAuthenticatedContext(): Promise<AuthenticatedContext | null> {
+export async function getAuthenticatedContext(explicitUser?: User | null): Promise<AuthenticatedContext | null> {
   if (!supabase) return null;
-  const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
-  if (sessionErr || !sessionData?.session?.user) return null;
 
-  const user = sessionData.session.user;
-  const { data: profile, error: profileErr } = await supabase
+  let user: User | null = explicitUser ?? null;
+  if (!user) {
+    const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+    if (sessionErr || !sessionData?.session?.user) {
+      cachedAuthContext = null;
+      return null;
+    }
+    user = sessionData.session.user;
+  }
+
+  if (cachedAuthContext && cachedAuthContext.ctx.userId === user.id && Date.now() - cachedAuthContext.timestamp < 15000) {
+    return cachedAuthContext.ctx;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<{ data: null; error: Error }>((resolve) => {
+    timer = setTimeout(() => resolve({ data: null, error: new Error('Hết thời gian chờ tải hồ sơ') }), 5000);
+  });
+
+  const queryPromise = supabase
     .from('profiles')
     .select('id, email, full_name, role, phone, avatar_url')
     .eq('id', user.id)
     .maybeSingle();
 
+  const { data: profile, error: profileErr } = await Promise.race([queryPromise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+
   if (profileErr || !profile) {
     return null;
   }
 
-  return {
+  const result: AuthenticatedContext = {
     userId: profile.id,
     email: profile.email ?? user.email ?? null,
     fullName: profile.full_name || 'Người dùng',
@@ -215,6 +444,13 @@ export async function getAuthenticatedContext(): Promise<AuthenticatedContext | 
     phone: profile.phone ?? null,
     avatarUrl: profile.avatar_url ?? null,
   };
+
+  cachedAuthContext = {
+    ctx: result,
+    timestamp: Date.now(),
+  };
+
+  return result;
 }
 
 /**
@@ -235,8 +471,8 @@ async function requireTeacherOrOfflineContext(): Promise<AuthenticatedContext | 
 /**
  * Đọc hồ sơ người dùng hiện tại dưới dạng UserProfile.
  */
-export async function getCurrentUserProfile(): Promise<UserProfile | null> {
-  const ctx = await getAuthenticatedContext();
+export async function getCurrentUserProfile(explicitUser?: User | null): Promise<UserProfile | null> {
+  const ctx = await getAuthenticatedContext(explicitUser);
   if (!ctx) return null;
   return {
     id: ctx.userId,
@@ -250,48 +486,108 @@ export async function getCurrentUserProfile(): Promise<UserProfile | null> {
 
 /**
  * Xóa các bản ghi đã từng đồng bộ từ tài khoản Cloud khỏi bộ nhớ đệm IndexedDB
- * (khi đăng xuất hoặc chuyển tài khoản), nhưng GIỮ NGUYÊN 100% dữ liệu Offline cục bộ.
+ * (khi đăng xuất hoặc chuyển tài khoản), nhưng GIỮ NGUYÊN 100% dữ liệu Offline cục bộ
+ * và BẢO TOÀN toàn bộ các bản ghi đang có thay đổi chờ đồng bộ trong cloud_pending_sync_queue.
  */
-export async function clearSyncedCloudCacheFromLocal(): Promise<void> {
-  const prev = await getCloudSyncedRecord();
-  const hasAny =
-    prev.classIds.length > 0 ||
-    prev.criterionIds.length > 0 ||
-    prev.studentIds.length > 0 ||
-    prev.attendanceIds.length > 0 ||
-    prev.transactionIds.length > 0 ||
-    prev.commentIds.length > 0 ||
-    prev.parentLinkIds.length > 0;
-
-  if (!hasAny) {
-    if (prev.userId) {
-      await saveCloudSyncedRecord({
-        userId: null,
-        classIds: [],
-        criterionIds: [],
-        studentIds: [],
-        attendanceIds: [],
-        transactionIds: [],
-        commentIds: [],
-        parentLinkIds: [],
-      });
-    }
+export async function clearSyncedCloudCacheFromLocal(targetDb?: PinkDB): Promise<void> {
+  invalidateAuthenticatedContextCache();
+  let scope: OperationScope;
+  try {
+    scope = getOperationScope(targetDb);
+  } catch {
+    // Nếu không có database người dùng hợp lệ nào đang hoạt động, an toàn bỏ qua
     return;
   }
-  await db.transaction(
-    'rw',
-    [db.classes, db.criteria, db.students, db.attendance, db.transactions, db.comments, db.parentLinks, db.kv],
-    async () => {
-      if (prev.classIds.length) await db.classes.bulkDelete(prev.classIds);
-      if (prev.criterionIds.length) await db.criteria.bulkDelete(prev.criterionIds);
-      if (prev.studentIds.length) await db.students.bulkDelete(prev.studentIds);
-      if (prev.attendanceIds.length) await db.attendance.bulkDelete(prev.attendanceIds);
-      if (prev.transactionIds.length) await db.transactions.bulkDelete(prev.transactionIds);
-      if (prev.commentIds.length) await db.comments.bulkDelete(prev.commentIds);
-      if (prev.parentLinkIds.length) await db.parentLinks.bulkDelete(prev.parentLinkIds);
-      await db.kv.put({
-        key: CLOUD_SYNC_KV_KEY,
-        value: {
+
+  // 1. Đọc hàng đợi đồng bộ đang chờ (cloud_pending_sync_queue)
+  // Tuyệt đối không xóa bất kỳ bản ghi nào đang có thay đổi chờ đồng bộ lên Cloud!
+  const pendingQueue = await getPendingSyncQueue(scope.db);
+  const pendingTxIds = new Set(
+    pendingQueue
+      .filter((i): i is Extract<PendingSyncItem, { kind: 'points_upsert' }> => i.kind === 'points_upsert')
+      .map((i) => i.txId),
+  );
+  const pendingCommentIds = new Set(
+    pendingQueue
+      .filter((i): i is Extract<PendingSyncItem, { kind: 'comment_upsert' | 'comment_delete' }> => i.kind === 'comment_upsert' || i.kind === 'comment_delete')
+      .map((i) => i.commentId),
+  );
+  const pendingAttendanceSlotKeys = new Set(
+    pendingQueue
+      .filter((i): i is Extract<PendingSyncItem, { kind: 'attendance_upsert' | 'attendance_clear' }> => i.kind === 'attendance_upsert' || i.kind === 'attendance_clear')
+      .map((i) => `${i.classId}|${i.date}|${i.session}`),
+  );
+  const pendingClassIds = new Set<string>();
+  for (const item of pendingQueue) {
+    if ('classId' in item && typeof item.classId === 'string') {
+      pendingClassIds.add(item.classId);
+    }
+  }
+
+  const prev = await getCloudSyncedRecord(scope.db);
+
+  // Chỉ dọn các bản ghi được xác định chắc chắn là cache Cloud CÓ THỂ TÁI TẠO từ Supabase (không có pending modifications)
+  const removedTransactionIds = prev.transactionIds.filter((id) => !pendingTxIds.has(id));
+  const remainingTransactionIds = prev.transactionIds.filter((id) => pendingTxIds.has(id));
+
+  const removedCommentIds = prev.commentIds.filter((id) => !pendingCommentIds.has(id));
+  const remainingCommentIds = prev.commentIds.filter((id) => pendingCommentIds.has(id));
+
+  const removedAttendanceIds = prev.attendanceIds.filter((id) => {
+    const slotKey = id.split('|').slice(0, 3).join('|');
+    return !pendingAttendanceSlotKeys.has(slotKey);
+  });
+  const remainingAttendanceIds = prev.attendanceIds.filter((id) => {
+    const slotKey = id.split('|').slice(0, 3).join('|');
+    return pendingAttendanceSlotKeys.has(slotKey);
+  });
+
+  // Nếu lớp học có chứa pending transactions/comments/attendance, giữ lại lớp học đó để không làm mồ côi dữ liệu chờ
+  const removedClassIds = prev.classIds.filter((id) => !pendingClassIds.has(id));
+  const remainingClassIds = prev.classIds.filter((id) => pendingClassIds.has(id));
+
+  // Tương tự, nếu học sinh có giao dịch hoặc điểm danh đang chờ, không xóa học sinh đó
+  const activeStudentIdsWithPending = new Set<string>();
+  if (pendingQueue.length > 0) {
+    if (remainingTransactionIds.length > 0) {
+      const remainingTxRows = await scope.db.transactions.bulkGet(remainingTransactionIds);
+      for (const tx of remainingTxRows) {
+        if (tx?.studentId) activeStudentIdsWithPending.add(tx.studentId);
+      }
+    }
+    for (const attId of remainingAttendanceIds) {
+      const parts = attId.split('|');
+      if (parts[3]) activeStudentIdsWithPending.add(parts[3]);
+    }
+  }
+
+  const removedStudentIds = prev.studentIds.filter((id) => !activeStudentIdsWithPending.has(id));
+  const remainingStudentIds = prev.studentIds.filter((id) => activeStudentIdsWithPending.has(id));
+
+  // Criteria và parent links là cache Cloud có thể tái tạo hoàn toàn
+  const removedCriterionIds = prev.criterionIds;
+  const removedParentLinkIds = prev.parentLinkIds;
+
+  const hasAnyToRemove =
+    removedClassIds.length > 0 ||
+    removedCriterionIds.length > 0 ||
+    removedStudentIds.length > 0 ||
+    removedAttendanceIds.length > 0 ||
+    removedTransactionIds.length > 0 ||
+    removedCommentIds.length > 0 ||
+    removedParentLinkIds.length > 0;
+
+  if (!hasAnyToRemove) {
+    if (
+      prev.userId &&
+      remainingTransactionIds.length === 0 &&
+      remainingCommentIds.length === 0 &&
+      remainingAttendanceIds.length === 0 &&
+      remainingClassIds.length === 0 &&
+      remainingStudentIds.length === 0
+    ) {
+      await saveCloudSyncedRecord(
+        {
           userId: null,
           classIds: [],
           criterionIds: [],
@@ -299,6 +595,46 @@ export async function clearSyncedCloudCacheFromLocal(): Promise<void> {
           attendanceIds: [],
           transactionIds: [],
           commentIds: [],
+          parentLinkIds: [],
+        },
+        scope.db,
+      );
+    }
+    return;
+  }
+
+  scope.assertActive();
+  await scope.db.transaction(
+    'rw',
+    [
+      scope.db.classes,
+      scope.db.criteria,
+      scope.db.students,
+      scope.db.attendance,
+      scope.db.transactions,
+      scope.db.comments,
+      scope.db.parentLinks,
+      scope.db.kv,
+    ],
+    async () => {
+      if (removedClassIds.length) await scope.db.classes.bulkDelete(removedClassIds);
+      if (removedCriterionIds.length) await scope.db.criteria.bulkDelete(removedCriterionIds);
+      if (removedStudentIds.length) await scope.db.students.bulkDelete(removedStudentIds);
+      if (removedAttendanceIds.length) await scope.db.attendance.bulkDelete(removedAttendanceIds);
+      if (removedTransactionIds.length) await scope.db.transactions.bulkDelete(removedTransactionIds);
+      if (removedCommentIds.length) await scope.db.comments.bulkDelete(removedCommentIds);
+      if (removedParentLinkIds.length) await scope.db.parentLinks.bulkDelete(removedParentLinkIds);
+
+      await scope.db.kv.put({
+        key: CLOUD_SYNC_KV_KEY,
+        value: {
+          userId: prev.userId,
+          classIds: remainingClassIds,
+          criterionIds: [],
+          studentIds: remainingStudentIds,
+          attendanceIds: remainingAttendanceIds,
+          transactionIds: remainingTransactionIds,
+          commentIds: remainingCommentIds,
           parentLinkIds: [],
         },
       });
@@ -310,29 +646,93 @@ export async function clearSyncedCloudCacheFromLocal(): Promise<void> {
  * Đẩy các thao tác đang chờ trong hàng đợi Offline (cloud_pending_sync_queue) lên Supabase.
  * Thực thi idempotent bằng khóa duy nhất / khóa chính UUID để không tạo bản ghi trùng lặp.
  */
-export async function flushPendingSyncQueue(): Promise<{
+export async function flushPendingSyncQueue(targetDb?: PinkDB): Promise<{
   flushedCount: number;
   remainingCount: number;
 }> {
-  if (!supabase) return { flushedCount: 0, remainingCount: (await getPendingSyncQueue()).length };
+  const scope = getOperationScope(targetDb);
+  if (!supabase) return { flushedCount: 0, remainingCount: (await getPendingSyncQueue(scope.db)).length };
   const ctx = await getAuthenticatedContext();
+  try {
+    scope.assertActive();
+  } catch {
+    return { flushedCount: 0, remainingCount: (await getPendingSyncQueue(scope.db)).length };
+  }
   if (!ctx || (ctx.role !== 'teacher' && ctx.role !== 'admin')) {
-    return { flushedCount: 0, remainingCount: (await getPendingSyncQueue()).length };
+    return { flushedCount: 0, remainingCount: (await getPendingSyncQueue(scope.db)).length };
   }
 
-  const queue = await getPendingSyncQueue();
+  // Xác minh phiên làm việc: database của scope phải khớp với danh tính ctx
+  const effectiveUserId = scope.userId ?? (isLegacyTestMode() ? ctx.userId : null);
+  if (!effectiveUserId || ctx.userId !== effectiveUserId) {
+    return { flushedCount: 0, remainingCount: (await getPendingSyncQueue(scope.db)).length };
+  }
+
+  const queue = await getPendingSyncQueue(scope.db);
   if (!queue.length) return { flushedCount: 0, remainingCount: 0 };
 
   const remaining: PendingSyncItem[] = [];
   let flushedCount = 0;
+  let sessionAborted = false;
 
-  for (const item of queue) {
+  for (let i = 0; i < queue.length; i++) {
+    const item = queue[i];
+
+    // Nếu đã phát hiện phiên đổi giữa các tab, bảo toàn toàn bộ mục còn lại và dừng
+    if (sessionAborted) {
+      remaining.push(item);
+      continue;
+    }
+
+    scope.assertActive();
+
+    // 1. Kiểm tra chủ sở hữu của mục:
+    // Nếu item có userId và không khớp với effectiveUserId -> cách ly
+    if (item.userId && item.userId !== effectiveUserId) {
+      remaining.push({
+        ...item,
+        status: 'quarantined',
+        lastError: `Chủ sở hữu mục (${item.userId}) không khớp với tài khoản hiện hành (${effectiveUserId}).`,
+      });
+      continue;
+    }
+
+    // Nếu item chưa có userId (mục cũ / legacy):
+    // Giữ nguyên và cách ly; không tự gán chủ sở hữu, gửi lên Cloud hoặc xóa.
+    if (!item.userId) {
+      if (isLegacyTestMode()) {
+        item.userId = effectiveUserId;
+      } else {
+        remaining.push({
+          ...item,
+          status: 'quarantined',
+          lastError: 'Mục hàng đợi cũ chưa xác định chủ sở hữu (cần quy trình di trú an toàn).',
+        });
+        continue;
+      }
+    }
+
+    // 2. Không tự động retry vô hạn khi gặp lỗi xác thực
+    if (item.status === 'failed_auth') {
+      remaining.push(item);
+      continue;
+    }
+
+    // 3. Kiểm tra danh tính phiên Supabase trước khi gửi (Multi-tab protection)
+    const validPre = await verifyCurrentSupabaseSessionUser(effectiveUserId);
+    if (!validPre) {
+      sessionAborted = true;
+      remaining.push(item);
+      continue;
+    }
+
     try {
       if (item.kind === 'attendance_upsert') {
-        const localRows = await db.attendance
+        const localRows = await scope.db.attendance
           .where('[classId+date+session]')
           .equals([item.classId, item.date, item.session])
           .toArray();
+        scope.assertActive();
         const validRows = localRows.filter((r) => isUUID(r.classId) && isUUID(r.studentId));
         if (validRows.length > 0) {
           const payload = validRows.map((r) => ({
@@ -342,16 +742,39 @@ export async function flushPendingSyncQueue(): Promise<{
             session: r.session,
             status: r.status,
             note: r.note ?? null,
-            recorded_by: ctx.userId,
+            recorded_by: effectiveUserId,
             updated_at: new Date(r.updatedAt).toISOString(),
           }));
           const { data: upserted, error } = await supabase
             .from('attendance')
             .upsert(payload, { onConflict: 'class_id,student_id,date,session' })
             .select('id');
+          scope.assertActive();
+
+          // Kiểm tra lại phiên Supabase sau khi chờ mạng (phát hiện tab khác đổi phiên trong lúc request đang bay)
+          const validPost = await verifyCurrentSupabaseSessionUser(effectiveUserId);
+          if (!validPost) {
+            sessionAborted = true;
+            remaining.push(item);
+            continue;
+          }
+
           if (error) {
             if (isNetworkOrOfflineError(error)) {
-              remaining.push(item);
+              remaining.push({
+                ...item,
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
+              continue;
+            }
+            if (isAuthOrPermissionError(error)) {
+              remaining.push({
+                ...item,
+                status: 'failed_auth',
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
               continue;
             }
             throw new Error(error.message);
@@ -359,9 +782,9 @@ export async function flushPendingSyncQueue(): Promise<{
           if (!upserted || upserted.length !== validRows.length) {
             throw new Error('Không có quyền đồng bộ điểm danh.');
           }
-          await trackCloudIds(ctx.userId, { attendanceIds: validRows.map((r) => r.id) });
+          await trackCloudIds(effectiveUserId, { attendanceIds: validRows.map((r) => r.id) }, scope.db);
+          flushedCount++;
         }
-        flushedCount++;
       } else if (item.kind === 'attendance_clear') {
         if (isUUID(item.classId)) {
           const { error } = await supabase
@@ -370,17 +793,40 @@ export async function flushPendingSyncQueue(): Promise<{
             .eq('class_id', item.classId)
             .eq('date', item.date)
             .eq('session', item.session);
+          scope.assertActive();
+
+          const validPost = await verifyCurrentSupabaseSessionUser(effectiveUserId);
+          if (!validPost) {
+            sessionAborted = true;
+            remaining.push(item);
+            continue;
+          }
+
           if (error) {
             if (isNetworkOrOfflineError(error)) {
-              remaining.push(item);
+              remaining.push({
+                ...item,
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
+              continue;
+            }
+            if (isAuthOrPermissionError(error)) {
+              remaining.push({
+                ...item,
+                status: 'failed_auth',
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
               continue;
             }
             throw new Error(error.message);
           }
+          flushedCount++;
         }
-        flushedCount++;
       } else if (item.kind === 'points_upsert') {
-        const tx = await db.transactions.get(item.txId);
+        const tx = await scope.db.transactions.get(item.txId);
+        scope.assertActive();
         if (tx && isUUID(tx.id) && isUUID(tx.classId) && isUUID(tx.studentId) && isUUID(tx.batchId)) {
           const { data: upserted, error } = await supabase
             .from('student_points')
@@ -393,7 +839,7 @@ export async function flushPendingSyncQueue(): Promise<{
                 criterion_name: tx.criterionName,
                 delta: tx.delta,
                 note: tx.note ?? null,
-                actor_id: ctx.userId,
+                actor_id: effectiveUserId,
                 batch_id: tx.batchId,
                 undone: Boolean(tx.undone),
                 undone_at: tx.undone && tx.undoneAt ? new Date(tx.undoneAt).toISOString() : null,
@@ -403,9 +849,22 @@ export async function flushPendingSyncQueue(): Promise<{
               { onConflict: 'id' },
             )
             .select('id');
+          scope.assertActive();
+
+          const validPost = await verifyCurrentSupabaseSessionUser(effectiveUserId);
+          if (!validPost) {
+            sessionAborted = true;
+            remaining.push(item);
+            continue;
+          }
+
           if (error) {
             if (isNetworkOrOfflineError(error)) {
-              remaining.push(item);
+              remaining.push({
+                ...item,
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
               continue;
             }
             if (error.code === '23505') {
@@ -414,25 +873,36 @@ export async function flushPendingSyncQueue(): Promise<{
                 .select('id')
                 .or(`id.eq.${tx.id},source_id.eq.${tx.id}`)
                 .maybeSingle();
+              scope.assertActive();
               if (exPoint) {
-                await trackCloudIds(ctx.userId, { transactionIds: [tx.id] });
+                await trackCloudIds(effectiveUserId, { transactionIds: [tx.id] }, scope.db);
                 flushedCount++;
                 continue;
               }
             }
-            remaining.push(item);
-            continue;
+            if (isAuthOrPermissionError(error)) {
+              remaining.push({
+                ...item,
+                status: 'failed_auth',
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
+              continue;
+            }
+            throw new Error(error.message);
           }
           if (!upserted || upserted.length === 0) {
             throw new Error('Không có quyền đồng bộ giao dịch điểm.');
           }
-          await trackCloudIds(ctx.userId, { transactionIds: [tx.id] });
+          await trackCloudIds(effectiveUserId, { transactionIds: [tx.id] }, scope.db);
+          flushedCount++;
         }
-        flushedCount++;
       } else if (item.kind === 'comment_upsert') {
-        const cmt = await db.comments.get(item.commentId);
+        const cmt = await scope.db.comments.get(item.commentId);
+        scope.assertActive();
         if (cmt && isUUID(cmt.id) && isUUID(cmt.classId) && isUUID(cmt.studentId)) {
-          const cls = await db.classes.get(cmt.classId);
+          const cls = await scope.db.classes.get(cmt.classId);
+          scope.assertActive();
           const schoolYear = cls?.schoolYear || schoolYearOf(parseISODate(cmt.date));
           const weekNumber = isoWeekNumber(cmt.date);
           const status = cmt.status ?? 'sent';
@@ -449,7 +919,7 @@ export async function flushPendingSyncQueue(): Promise<{
                 content: cmt.content,
                 status,
                 sent_at: status === 'sent' ? new Date(cmt.sentAt ?? cmt.updatedAt).toISOString() : null,
-                teacher_id: ctx.userId,
+                teacher_id: effectiveUserId,
                 tags: cmt.tags ?? [],
                 created_at: new Date(cmt.createdAt).toISOString(),
                 updated_at: new Date(cmt.updatedAt).toISOString(),
@@ -457,9 +927,31 @@ export async function flushPendingSyncQueue(): Promise<{
               { onConflict: 'id' },
             )
             .select('id');
+          scope.assertActive();
+
+          const validPost = await verifyCurrentSupabaseSessionUser(effectiveUserId);
+          if (!validPost) {
+            sessionAborted = true;
+            remaining.push(item);
+            continue;
+          }
+
           if (error) {
             if (isNetworkOrOfflineError(error)) {
-              remaining.push(item);
+              remaining.push({
+                ...item,
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
+              continue;
+            }
+            if (isAuthOrPermissionError(error)) {
+              remaining.push({
+                ...item,
+                status: 'failed_auth',
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
               continue;
             }
             throw new Error(error.message);
@@ -467,29 +959,75 @@ export async function flushPendingSyncQueue(): Promise<{
           if (!upserted || upserted.length === 0) {
             throw new Error('Không có quyền đồng bộ nhận xét.');
           }
-          await trackCloudIds(ctx.userId, { commentIds: [cmt.id] });
+          await trackCloudIds(effectiveUserId, { commentIds: [cmt.id] }, scope.db);
+          flushedCount++;
         }
-        flushedCount++;
       } else if (item.kind === 'comment_delete') {
         if (isUUID(item.commentId)) {
           const { error } = await supabase.from('weekly_comments').delete().eq('id', item.commentId);
+          scope.assertActive();
+
+          const validPost = await verifyCurrentSupabaseSessionUser(effectiveUserId);
+          if (!validPost) {
+            sessionAborted = true;
+            remaining.push(item);
+            continue;
+          }
+
           if (error) {
             if (isNetworkOrOfflineError(error)) {
-              remaining.push(item);
+              remaining.push({
+                ...item,
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
+              continue;
+            }
+            if (isAuthOrPermissionError(error)) {
+              remaining.push({
+                ...item,
+                status: 'failed_auth',
+                retryCount: (item.retryCount ?? 0) + 1,
+                lastError: error.message,
+              });
               continue;
             }
             throw new Error(error.message);
           }
+          flushedCount++;
         }
-        flushedCount++;
       }
-    } catch {
-      // Nếu thao tác gặp lỗi không xác định, bảo toàn mục trong hàng đợi để không mất dữ liệu
-      remaining.push(item);
+    } catch (err) {
+      if (isAuthOrPermissionError(err)) {
+        remaining.push({
+          ...item,
+          status: 'failed_auth',
+          retryCount: (item.retryCount ?? 0) + 1,
+          lastError: err instanceof Error ? err.message : String(err),
+        });
+      } else {
+        remaining.push({
+          ...item,
+          retryCount: (item.retryCount ?? 0) + 1,
+          lastError: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
-  await savePendingSyncQueue(remaining);
+  // Đảm bảo lưu lại các mục còn lại vào đúng scope.db
+  try {
+    scope.assertActive();
+    await savePendingSyncQueue(remaining, scope.db);
+  } catch {
+    // Nếu phiên thay đổi khiến assertActive fail, cố gắng lưu trực tiếp vào scope.db ban đầu
+    try {
+      await scope.db.kv.put({ key: PENDING_SYNC_QUEUE_KEY, value: remaining });
+    } catch {
+      // ignore
+    }
+  }
+
   return { flushedCount, remainingCount: remaining.length };
 }
 
@@ -498,7 +1036,10 @@ export async function flushPendingSyncQueue(): Promise<{
  * Điểm danh, Điểm thi đua và Nhận xét tuần từ Supabase về IndexedDB,
  * bảo toàn toàn bộ dữ liệu Offline hiện có.
  */
-export async function syncClassesAndStudentsFromSupabase(): Promise<{
+export async function syncClassesAndStudentsFromSupabase(
+  options?: { autoFlush?: boolean },
+  targetDb?: PinkDB,
+): Promise<{
   synced: boolean;
   classesCount: number;
   criteriaCount: number;
@@ -507,6 +1048,7 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
   transactionsCount?: number;
   commentsCount?: number;
 }> {
+  const scope = getOperationScope(targetDb);
   if (!supabase) {
     return {
       synced: false,
@@ -520,8 +1062,10 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
   }
 
   const ctx = await getAuthenticatedContext();
+  scope.assertActive();
   if (!ctx) {
-    await clearSyncedCloudCacheFromLocal();
+    // Không xóa dữ liệu cục bộ khi mất mạng hoặc không thể tải hồ sơ tạm thời,
+    // đảm bảo tính bền vững Offline-First cho ứng dụng.
     return {
       synced: false,
       classesCount: 0,
@@ -534,7 +1078,8 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
   }
 
   if (ctx.role !== 'teacher' && ctx.role !== 'admin') {
-    await clearSyncedCloudCacheFromLocal();
+    // Chỉ dọn cache lớp học của giáo viên khi đã xác minh người dùng hiện tại có vai trò khác (ví dụ: phụ huynh)
+    await clearSyncedCloudCacheFromLocal(scope.db);
     return {
       synced: false,
       classesCount: 0,
@@ -546,9 +1091,12 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
     };
   }
 
-  // Đẩy các thao tác đang chờ trong hàng đợi Offline lên Cloud trước khi Pull
-  await flushPendingSyncQueue();
-  const pendingQueue = await getPendingSyncQueue();
+  // Đẩy các thao tác đang chờ trong hàng đợi Offline lên Cloud (chỉ khi được yêu cầu tường minh, không tự động khi init/switch)
+  if (options?.autoFlush) {
+    await flushPendingSyncQueue(scope.db);
+    scope.assertActive();
+  }
+  const pendingQueue = await getPendingSyncQueue(scope.db);
   const pendingTxIds = new Set(
     pendingQueue.filter((i): i is Extract<PendingSyncItem, { kind: 'points_upsert' }> => i.kind === 'points_upsert').map((i) => i.txId),
   );
@@ -573,26 +1121,80 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
   }
 
   const { data: cloudClasses, error: clsErr } = await classesQuery;
+  scope.assertActive();
   if (clsErr) throw new Error(`Lỗi tải danh sách lớp từ Supabase: ${clsErr.message}`);
 
   const classIds = (cloudClasses ?? []).map((c) => c.id as string);
 
-  const { data: cloudCriteria, error: critErr } = classIds.length
-    ? await supabase
-        .from('criteria')
-        .select('id, class_id, name, points, type, icon, display_order, archived, created_at')
-        .in('class_id', classIds)
-    : { data: [], error: null };
-  if (critErr) throw new Error(`Lỗi tải tiêu chí từ Supabase: ${critErr.message}`);
+  // Tối ưu hóa: Chạy song song 6 bảng phụ thuộc classIds bằng Promise.all thay vì tuần tự
+  const [
+    criteriaRes,
+    membershipsRes,
+    attendanceRes,
+    pointsRes,
+    commentsRes,
+    tokensRes,
+  ] = await Promise.all([
+    classIds.length
+      ? supabase
+          .from('criteria')
+          .select('id, class_id, name, points, type, icon, display_order, archived, created_at')
+          .in('class_id', classIds)
+      : Promise.resolve({ data: [], error: null }),
+    classIds.length
+      ? supabase
+          .from('class_memberships')
+          .select('class_id, student_id, is_active, created_at')
+          .in('class_id', classIds)
+          .eq('is_active', true)
+      : Promise.resolve({ data: [], error: null }),
+    classIds.length
+      ? supabase
+          .from('attendance')
+          .select('id, class_id, student_id, date, session, status, note, recorded_by, updated_at')
+          .in('class_id', classIds)
+      : Promise.resolve({ data: [], error: null }),
+    classIds.length
+      ? supabase
+          .from('student_points')
+          .select(
+            'id, class_id, student_id, criterion_id, criterion_name, delta, note, actor_id, batch_id, undone, undone_at, created_at',
+          )
+          .in('class_id', classIds)
+      : Promise.resolve({ data: [], error: null }),
+    classIds.length
+      ? supabase
+          .from('weekly_comments')
+          .select(
+            'id, class_id, student_id, week_number, school_year, date, content, status, sent_at, teacher_id, tags, created_at, updated_at',
+          )
+          .in('class_id', classIds)
+      : Promise.resolve({ data: [], error: null }),
+    classIds.length
+      ? supabase
+          .from('parent_invitation_tokens')
+          .select(
+            'id, class_id, student_id, token_hash, parent_phone, expires_at, is_revoked, revoked_at, used_at, used_by, created_at, updated_at',
+          )
+          .in('class_id', classIds)
+          .order('created_at', { ascending: true })
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  scope.assertActive();
 
-  const { data: cloudMemberships, error: memErr } = classIds.length
-    ? await supabase
-        .from('class_memberships')
-        .select('class_id, student_id, is_active, created_at')
-        .in('class_id', classIds)
-        .eq('is_active', true)
-    : { data: [], error: null };
-  if (memErr) throw new Error(`Lỗi tải liên kết lớp từ Supabase: ${memErr.message}`);
+  if (criteriaRes.error) throw new Error(`Lỗi tải tiêu chí từ Supabase: ${criteriaRes.error.message}`);
+  if (membershipsRes.error) throw new Error(`Lỗi tải liên kết lớp từ Supabase: ${membershipsRes.error.message}`);
+  if (attendanceRes.error) throw new Error(`Lỗi tải điểm danh từ Supabase: ${attendanceRes.error.message}`);
+  if (pointsRes.error) throw new Error(`Lỗi tải điểm thi đua từ Supabase: ${pointsRes.error.message}`);
+  if (commentsRes.error) throw new Error(`Lỗi tải nhận xét tuần từ Supabase: ${commentsRes.error.message}`);
+  if (tokensRes.error) throw new Error(`Lỗi tải mã mời phụ huynh từ Supabase: ${tokensRes.error.message}`);
+
+  const cloudCriteria = criteriaRes.data;
+  const cloudMemberships = membershipsRes.data;
+  const cloudAttendance = attendanceRes.data;
+  const cloudPoints = pointsRes.data;
+  const cloudComments = commentsRes.data;
+  const cloudTokens = tokensRes.data;
 
   const studentToClassMap = new Map<string, string>();
   for (const m of cloudMemberships ?? []) {
@@ -600,74 +1202,43 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
   }
 
   const studentIds = Array.from(studentToClassMap.keys());
-  const { data: cloudStudents, error: stuErr } = studentIds.length
-    ? await supabase
-        .from('students')
-        .select(
-          'id, code, full_name, birth_date, gender, avatar, note, parent_name, parent_phone, status, created_at, updated_at',
-        )
-        .in('id', studentIds)
-    : { data: [], error: null };
-  if (stuErr) throw new Error(`Lỗi tải danh sách học sinh từ Supabase: ${stuErr.message}`);
 
-  const { data: cloudAttendance, error: attErr } = classIds.length
-    ? await supabase
-        .from('attendance')
-        .select('id, class_id, student_id, date, session, status, note, recorded_by, updated_at')
-        .in('class_id', classIds)
-    : { data: [], error: null };
-  if (attErr) throw new Error(`Lỗi tải điểm danh từ Supabase: ${attErr.message}`);
+  // Tối ưu hóa: Chạy song song students và parent_students
+  const [studentsRes, parentStudentsRes] = await Promise.all([
+    studentIds.length
+      ? supabase
+          .from('students')
+          .select(
+            'id, code, full_name, birth_date, gender, avatar, note, parent_name, parent_phone, status, created_at, updated_at',
+          )
+          .in('id', studentIds)
+      : Promise.resolve({ data: [], error: null }),
+    studentIds.length
+      ? supabase
+          .from('parent_students')
+          .select('student_id, parent_id, is_verified')
+          .in('student_id', studentIds)
+          .eq('is_verified', true)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  scope.assertActive();
 
-  const { data: cloudPoints, error: ptsErr } = classIds.length
-    ? await supabase
-        .from('student_points')
-        .select(
-          'id, class_id, student_id, criterion_id, criterion_name, delta, note, actor_id, batch_id, undone, undone_at, created_at',
-        )
-        .in('class_id', classIds)
-    : { data: [], error: null };
-  if (ptsErr) throw new Error(`Lỗi tải điểm thi đua từ Supabase: ${ptsErr.message}`);
+  if (studentsRes.error) throw new Error(`Lỗi tải danh sách học sinh từ Supabase: ${studentsRes.error.message}`);
+  if (parentStudentsRes.error) throw new Error(`Lỗi tải trạng thái liên kết phụ huynh từ Supabase: ${parentStudentsRes.error.message}`);
 
-  const { data: cloudComments, error: cmtErr } = classIds.length
-    ? await supabase
-        .from('weekly_comments')
-        .select(
-          'id, class_id, student_id, week_number, school_year, date, content, status, sent_at, teacher_id, tags, created_at, updated_at',
-        )
-        .in('class_id', classIds)
-    : { data: [], error: null };
-  if (cmtErr) throw new Error(`Lỗi tải nhận xét tuần từ Supabase: ${cmtErr.message}`);
-
-  const { data: cloudTokens, error: tokErr } = classIds.length
-    ? await supabase
-        .from('parent_invitation_tokens')
-        .select(
-          'id, class_id, student_id, token_hash, parent_phone, expires_at, is_revoked, revoked_at, used_at, used_by, created_at, updated_at',
-        )
-        .in('class_id', classIds)
-        .order('created_at', { ascending: true })
-    : { data: [], error: null };
-  if (tokErr) throw new Error(`Lỗi tải mã mời phụ huynh từ Supabase: ${tokErr.message}`);
-
-  const { data: cloudParentStudents, error: psErr } = studentIds.length
-    ? await supabase
-        .from('parent_students')
-        .select('student_id, parent_id, is_verified')
-        .in('student_id', studentIds)
-        .eq('is_verified', true)
-    : { data: [], error: null };
-  if (psErr) throw new Error(`Lỗi tải trạng thái liên kết phụ huynh từ Supabase: ${psErr.message}`);
+  const cloudStudents = studentsRes.data;
+  const cloudParentStudents = parentStudentsRes.data;
 
   const verifiedStudentSet = new Set<string>(
     (cloudParentStudents ?? []).map((ps) => ps.student_id as string),
   );
 
-  const existingLocalClasses = await db.classes.bulkGet(classIds);
+  const existingLocalClasses = await scope.db.classes.bulkGet(classIds);
   const existingTeacherNameById = new Map<string, string>();
   for (const lc of existingLocalClasses) {
     if (lc?.id && lc.teacherName) existingTeacherNameById.set(lc.id, lc.teacherName);
   }
-  const defaultTeacherLabel = await actorName();
+  const defaultTeacherLabel = await actorName(scope.db);
 
   const mappedClasses: ClassRoom[] = (cloudClasses ?? []).map((c) => ({
     id: c.id as string,
@@ -768,7 +1339,7 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
     });
   }
 
-  const existingLocalLinks = await db.parentLinks.toArray();
+  const existingLocalLinks = await scope.db.parentLinks.toArray();
   const lastSentById = new Map<string, number>();
   for (const ll of existingLocalLinks) {
     if (ll.lastSentAt) lastSentById.set(ll.id, ll.lastSentAt);
@@ -801,7 +1372,7 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
   }
   const mappedParentLinks: ParentLink[] = Array.from(latestTokenByPair.values());
 
-  const prevSynced = await getCloudSyncedRecord();
+  const prevSynced = await getCloudSyncedRecord(scope.db);
   const nextClassIds = mappedClasses.map((c) => c.id);
   const nextCriterionIds = mappedCriteria.map((c) => c.id);
   const nextStudentIds = mappedStudents.map((s) => s.id);
@@ -832,27 +1403,28 @@ export async function syncClassesAndStudentsFromSupabase(): Promise<{
   );
   const removedParentLinkIds = prevSynced.parentLinkIds.filter((id) => !nextParentLinkSet.has(id));
 
-  await db.transaction(
+  scope.assertActive();
+  await scope.db.transaction(
     'rw',
-    [db.classes, db.criteria, db.students, db.attendance, db.transactions, db.comments, db.parentLinks, db.kv],
+    [scope.db.classes, scope.db.criteria, scope.db.students, scope.db.attendance, scope.db.transactions, scope.db.comments, scope.db.parentLinks, scope.db.kv],
     async () => {
-      if (removedClassIds.length) await db.classes.bulkDelete(removedClassIds);
-      if (removedCriterionIds.length) await db.criteria.bulkDelete(removedCriterionIds);
-      if (removedStudentIds.length) await db.students.bulkDelete(removedStudentIds);
-      if (removedAttendanceIds.length) await db.attendance.bulkDelete(removedAttendanceIds);
-      if (removedTransactionIds.length) await db.transactions.bulkDelete(removedTransactionIds);
-      if (removedCommentIds.length) await db.comments.bulkDelete(removedCommentIds);
-      if (removedParentLinkIds.length) await db.parentLinks.bulkDelete(removedParentLinkIds);
+      if (removedClassIds.length) await scope.db.classes.bulkDelete(removedClassIds);
+      if (removedCriterionIds.length) await scope.db.criteria.bulkDelete(removedCriterionIds);
+      if (removedStudentIds.length) await scope.db.students.bulkDelete(removedStudentIds);
+      if (removedAttendanceIds.length) await scope.db.attendance.bulkDelete(removedAttendanceIds);
+      if (removedTransactionIds.length) await scope.db.transactions.bulkDelete(removedTransactionIds);
+      if (removedCommentIds.length) await scope.db.comments.bulkDelete(removedCommentIds);
+      if (removedParentLinkIds.length) await scope.db.parentLinks.bulkDelete(removedParentLinkIds);
 
-      if (mappedClasses.length) await db.classes.bulkPut(mappedClasses);
-      if (mappedCriteria.length) await db.criteria.bulkPut(mappedCriteria);
-      if (mappedStudents.length) await db.students.bulkPut(mappedStudents);
-      if (mappedAttendance.length) await db.attendance.bulkPut(mappedAttendance);
-      if (mappedTransactions.length) await db.transactions.bulkPut(mappedTransactions);
-      if (mappedComments.length) await db.comments.bulkPut(mappedComments);
-      if (mappedParentLinks.length) await db.parentLinks.bulkPut(mappedParentLinks);
+      if (mappedClasses.length) await scope.db.classes.bulkPut(mappedClasses);
+      if (mappedCriteria.length) await scope.db.criteria.bulkPut(mappedCriteria);
+      if (mappedStudents.length) await scope.db.students.bulkPut(mappedStudents);
+      if (mappedAttendance.length) await scope.db.attendance.bulkPut(mappedAttendance);
+      if (mappedTransactions.length) await scope.db.transactions.bulkPut(mappedTransactions);
+      if (mappedComments.length) await scope.db.comments.bulkPut(mappedComments);
+      if (mappedParentLinks.length) await scope.db.parentLinks.bulkPut(mappedParentLinks);
 
-      await db.kv.put({
+      await scope.db.kv.put({
         key: CLOUD_SYNC_KV_KEY,
         value: {
           userId: ctx.userId,
@@ -898,28 +1470,36 @@ export const DEFAULT_SETTINGS: AppSettings = {
   soundEnabled: true,
 };
 
-export async function getSettings(): Promise<AppSettings> {
-  const row = await db.kv.get('settings');
+export async function getSettings(targetDb?: PinkDB): Promise<AppSettings> {
+  const scope = getOperationScope(targetDb);
+  const row = await scope.db.kv.get('settings');
   return { ...DEFAULT_SETTINGS, ...((row?.value as Partial<AppSettings>) || {}) };
 }
 
-export async function saveSettings(patch: Partial<AppSettings>) {
-  const cur = await getSettings();
+export async function saveSettings(patch: Partial<AppSettings>, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
+  const cur = await getSettings(scope.db);
   const next = { ...cur, ...patch };
   if (!next.teacherName.trim()) throw new ValidationError({ teacherName: 'Vui lòng nhập tên giáo viên' });
-  await db.kv.put({ key: 'settings', value: next });
+  await scope.db.kv.put({ key: 'settings', value: next });
   return next;
 }
 
-export async function actorName(): Promise<string> {
-  const s = await getSettings();
+export async function actorName(targetDb?: PinkDB): Promise<string> {
+  const s = await getSettings(targetDb);
   return `${s.teacherTitle === 'cô' ? 'Cô' : 'Thầy'} ${s.teacherName}`;
 }
 
 /* ---------------- Activity log ---------------- */
 
-export async function logActivity(classId: string | null, kind: ActivityLog['kind'], message: string) {
-  await db.activities.add({ id: uid('a_'), classId, kind, message, createdAt: Date.now() });
+export async function logActivity(
+  classId: string | null,
+  kind: ActivityLog['kind'],
+  message: string,
+  targetDb?: PinkDB,
+) {
+  const scope = getOperationScope(targetDb);
+  await scope.db.activities.add({ id: uid('a_'), classId, kind, message, createdAt: Date.now() });
 }
 
 /* ---------------- Classes ---------------- */
@@ -956,16 +1536,18 @@ export const DEFAULT_CRITERIA: Omit<Criterion, 'id' | 'classId' | 'createdAt' | 
   { name: 'Nói chuyện riêng', points: -1, type: 'penalty', icon: 'message' },
 ];
 
-export async function createClass(input: ClassInput): Promise<ClassRoom> {
+export async function createClass(input: ClassInput, targetDb?: PinkDB): Promise<ClassRoom> {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const errors = validateClass(input);
   if (Object.keys(errors).length) throw new ValidationError(errors);
-  const dup = await db.classes
+  const dup = await scope.db.classes
     .filter((c) => normalizeVN(c.name) === normalizeVN(input.name) && c.schoolYear === input.schoolYear.trim())
     .first();
   if (dup) throw new ValidationError({ name: 'Đã có lớp cùng tên trong năm học này' });
 
-  const count = await db.classes.count();
+  const count = await scope.db.classes.count();
   const now = Date.now();
   const classId = uuidv4();
   const color = input.color || CLASS_COLORS[count % CLASS_COLORS.length];
@@ -1000,6 +1582,7 @@ export async function createClass(input: ClassInput): Promise<ClassRoom> {
       note: cls.note || null,
       color: cls.color,
     });
+    scope.assertActive();
     if (clsErr) {
       if (clsErr.code === '23505') {
         throw new ValidationError({ name: 'Đã có lớp cùng tên trong năm học này' });
@@ -1019,29 +1602,37 @@ export async function createClass(input: ClassInput): Promise<ClassRoom> {
         archived: false,
       })),
     );
+    scope.assertActive();
     if (critErr) {
       throw new Error(critErr.message);
     }
 
-    await trackCloudIds(authCtx.userId, {
-      classIds: [cls.id],
-      criterionIds: criteriaRows.map((c) => c.id),
-    });
+    await trackCloudIds(
+      authCtx.userId,
+      {
+        classIds: [cls.id],
+        criterionIds: criteriaRows.map((c) => c.id),
+      },
+      scope.db,
+    );
+    scope.assertActive();
   }
 
-  await db.transaction('rw', db.classes, db.criteria, db.activities, async () => {
-    await db.classes.put(cls);
-    await db.criteria.bulkPut(criteriaRows);
-    await logActivity(cls.id, 'class', `Tạo lớp ${cls.name}`);
+  await scope.db.transaction('rw', scope.db.classes, scope.db.criteria, scope.db.activities, async () => {
+    await scope.db.classes.put(cls);
+    await scope.db.criteria.bulkPut(criteriaRows);
+    await logActivity(cls.id, 'class', `Tạo lớp ${cls.name}`, scope.db);
   });
   return cls;
 }
 
-export async function updateClass(id: string, input: ClassInput) {
+export async function updateClass(id: string, input: ClassInput, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const errors = validateClass(input);
   if (Object.keys(errors).length) throw new ValidationError(errors);
-  const dup = await db.classes
+  const dup = await scope.db.classes
     .filter((c) => c.id !== id && normalizeVN(c.name) === normalizeVN(input.name) && c.schoolYear === input.schoolYear.trim())
     .first();
   if (dup) throw new ValidationError({ name: 'Đã có lớp cùng tên trong năm học này' });
@@ -1061,6 +1652,7 @@ export async function updateClass(id: string, input: ClassInput) {
       .update(patchPayload)
       .eq('id', id)
       .select('id');
+    scope.assertActive();
 
     if (updErr) {
       if (updErr.code === '23505') {
@@ -1073,7 +1665,7 @@ export async function updateClass(id: string, input: ClassInput) {
     }
   }
 
-  await db.classes.update(id, {
+  await scope.db.classes.update(id, {
     name: input.name.trim(),
     schoolYear: input.schoolYear.trim(),
     teacherName: input.teacherName.trim(),
@@ -1082,13 +1674,15 @@ export async function updateClass(id: string, input: ClassInput) {
     color: input.color,
     updatedAt: Date.now(),
   });
-  await logActivity(id, 'class', `Cập nhật thông tin lớp ${input.name.trim()}`);
+  await logActivity(id, 'class', `Cập nhật thông tin lớp ${input.name.trim()}`, scope.db);
 }
 
 /** Xóa lớp và toàn bộ dữ liệu thuộc lớp (gọi sau khi giáo viên đã xác nhận & được gợi ý sao lưu) */
-export async function deleteClass(id: string) {
+export async function deleteClass(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const cls = await db.classes.get(id);
+  scope.assertActive();
+  const cls = await scope.db.classes.get(id);
 
   if (authCtx && supabase && isUUID(id)) {
     // Lấy danh sách học sinh đang hoạt động trong lớp để xóa khi giáo viên còn quyền is_teacher_of_student
@@ -1096,11 +1690,13 @@ export async function deleteClass(id: string) {
       .from('class_memberships')
       .select('student_id')
       .eq('class_id', id);
+    scope.assertActive();
     if (memErr) throw new Error(memErr.message);
 
     const stuIds = Array.from(new Set((memRows ?? []).map((m) => m.student_id as string))).filter(isUUID);
     if (stuIds.length > 0) {
       const { error: stuDelErr } = await supabase.from('students').delete().in('id', stuIds);
+      scope.assertActive();
       if (stuDelErr) throw new Error(stuDelErr.message);
     }
 
@@ -1109,26 +1705,37 @@ export async function deleteClass(id: string) {
       .delete()
       .eq('id', id)
       .select('id');
+    scope.assertActive();
     if (clsDelErr) throw new Error(clsDelErr.message);
     if (!deletedClasses || deletedClasses.length === 0) {
       throw new Error('Không tìm thấy lớp học hoặc bạn không có quyền xóa lớp này.');
     }
   }
 
-  await db.transaction(
+  await scope.db.transaction(
     'rw',
-    [db.classes, db.students, db.attendance, db.criteria, db.transactions, db.comments, db.gamePicks, db.tasks, db.activities],
+    [
+      scope.db.classes,
+      scope.db.students,
+      scope.db.attendance,
+      scope.db.criteria,
+      scope.db.transactions,
+      scope.db.comments,
+      scope.db.gamePicks,
+      scope.db.tasks,
+      scope.db.activities,
+    ],
     async () => {
-      await db.students.where('classId').equals(id).delete();
-      await db.attendance.where('classId').equals(id).delete();
-      await db.criteria.where('classId').equals(id).delete();
-      await db.transactions.where('classId').equals(id).delete();
-      await db.comments.where('classId').equals(id).delete();
-      await db.gamePicks.where('classId').equals(id).delete();
-      await db.tasks.where('classId').equals(id).delete();
-      await db.activities.where('classId').equals(id).delete();
-      await db.classes.delete(id);
-      await logActivity(null, 'class', `Đã xóa lớp ${cls?.name ?? ''}`);
+      await scope.db.students.where('classId').equals(id).delete();
+      await scope.db.attendance.where('classId').equals(id).delete();
+      await scope.db.criteria.where('classId').equals(id).delete();
+      await scope.db.transactions.where('classId').equals(id).delete();
+      await scope.db.comments.where('classId').equals(id).delete();
+      await scope.db.gamePicks.where('classId').equals(id).delete();
+      await scope.db.tasks.where('classId').equals(id).delete();
+      await scope.db.activities.where('classId').equals(id).delete();
+      await scope.db.classes.delete(id);
+      await logActivity(null, 'class', `Đã xóa lớp ${cls?.name ?? ''}`, scope.db);
     },
   );
 }
@@ -1169,14 +1776,16 @@ export function validateStudentInput(input: StudentInput): Record<string, string
 }
 
 /** Mã học sinh là duy nhất trên toàn hệ thống */
-export async function isCodeTaken(code: string, exceptId?: string) {
+export async function isCodeTaken(code: string, exceptId?: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const c = code.trim().toUpperCase();
-  const found = await db.students.filter((s) => s.code.toUpperCase() === c && s.id !== exceptId).first();
+  const found = await scope.db.students.filter((s) => s.code.toUpperCase() === c && s.id !== exceptId).first();
   return !!found;
 }
 
-export async function suggestNextCode(): Promise<string> {
-  const all = await db.students.toArray();
+export async function suggestNextCode(targetDb?: PinkDB): Promise<string> {
+  const scope = getOperationScope(targetDb);
+  const all = await scope.db.students.toArray();
   let max = 0;
   for (const s of all) {
     const m = /^HS(\d+)$/i.exec(s.code);
@@ -1198,10 +1807,16 @@ function cleanStudent(input: StudentInput) {
   };
 }
 
-export async function addStudent(classId: string, input: StudentInput): Promise<Student> {
+export async function addStudent(classId: string, input: StudentInput, targetDb?: PinkDB): Promise<Student> {
+  if (!classId || !classId.trim()) {
+    throw new Error('Vui lòng chọn hoặc tạo lớp học trước khi thêm học sinh.');
+  }
+
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const errors = validateStudentInput(input);
-  if (!errors.code && (await isCodeTaken(input.code))) errors.code = 'Mã học sinh đã tồn tại';
+  if (!errors.code && (await isCodeTaken(input.code, undefined, scope.db))) errors.code = 'Mã học sinh đã tồn tại';
   if (Object.keys(errors).length) throw new ValidationError(errors);
 
   const cleaned = cleanStudent(input);
@@ -1209,6 +1824,31 @@ export async function addStudent(classId: string, input: StudentInput): Promise<
   let studentId = uuidv4();
 
   if (authCtx && supabase && isUUID(classId)) {
+    // Đảm bảo lớp học tồn tại trên Supabase trước khi tạo học sinh
+    const { data: cloudCls, error: checkClsErr } = await supabase
+      .from('classes')
+      .select('id, teacher_id')
+      .eq('id', classId)
+      .maybeSingle();
+
+    if (!cloudCls && !checkClsErr) {
+      const localCls = await scope.db.classes.get(classId);
+      if (localCls) {
+        const { error: insClsErr } = await supabase.from('classes').insert({
+          id: localCls.id,
+          name: localCls.name,
+          school_year: localCls.schoolYear,
+          teacher_id: authCtx.userId,
+          subject: localCls.subject || null,
+          note: localCls.note || null,
+          color: localCls.color,
+        });
+        if (insClsErr && insClsErr.code !== '23505') {
+          console.warn('[addStudent] Lớp học chưa có trên máy chủ và không thể đồng bộ tự động:', insClsErr.message);
+        }
+      }
+    }
+
     const { data: rpcRes, error: rpcErr } = await supabase.rpc('create_student_in_class', {
       p_class_id: classId,
       p_code: cleaned.code,
@@ -1220,10 +1860,19 @@ export async function addStudent(classId: string, input: StudentInput): Promise<
       p_parent_name: cleaned.parentName ?? null,
       p_parent_phone: cleaned.parentPhone ?? null,
     });
+    scope.assertActive();
 
     if (rpcErr) {
-      if (rpcErr.code === '23505') {
-        throw new ValidationError({ code: 'Mã học sinh đã tồn tại' });
+      if (
+        rpcErr.code === '23505' ||
+        rpcErr.message.includes('Mã học sinh') ||
+        rpcErr.message.includes('already exists') ||
+        rpcErr.message.includes('duplicate key')
+      ) {
+        throw new ValidationError({ code: 'Mã học sinh đã tồn tại trên hệ thống' });
+      }
+      if (rpcErr.message.includes('Bạn không phải là giáo viên')) {
+        throw new Error('Quyền bị từ chối: Bạn không phải là giáo viên phụ trách lớp này trên máy chủ.');
       }
       throw new Error(rpcErr.message);
     }
@@ -1233,7 +1882,8 @@ export async function addStudent(classId: string, input: StudentInput): Promise<
       throw new Error('Không nhận được mã định danh học sinh hợp lệ từ máy chủ.');
     }
     studentId = returnedId;
-    await trackCloudIds(authCtx.userId, { studentIds: [studentId] });
+    await trackCloudIds(authCtx.userId, { studentIds: [studentId] }, scope.db);
+    scope.assertActive();
   }
 
   const s: Student = {
@@ -1244,15 +1894,17 @@ export async function addStudent(classId: string, input: StudentInput): Promise<
     createdAt: now,
     updatedAt: now,
   };
-  await db.students.put(s);
-  await logActivity(classId, 'student', `Thêm học sinh ${s.fullName}`);
+  await scope.db.students.put(s);
+  await logActivity(classId, 'student', `Thêm học sinh ${s.fullName}`, scope.db);
   return s;
 }
 
-export async function updateStudent(id: string, input: StudentInput) {
+export async function updateStudent(id: string, input: StudentInput, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const errors = validateStudentInput(input);
-  if (!errors.code && (await isCodeTaken(input.code, id))) errors.code = 'Mã học sinh đã tồn tại';
+  if (!errors.code && (await isCodeTaken(input.code, id, scope.db))) errors.code = 'Mã học sinh đã tồn tại';
   if (Object.keys(errors).length) throw new ValidationError(errors);
 
   const cleaned = cleanStudent(input);
@@ -1273,6 +1925,7 @@ export async function updateStudent(id: string, input: StudentInput) {
       })
       .eq('id', id)
       .select('id');
+    scope.assertActive();
 
     if (updErr) {
       if (updErr.code === '23505') {
@@ -1285,21 +1938,27 @@ export async function updateStudent(id: string, input: StudentInput) {
     }
   }
 
-  const cur = await db.students.get(id);
+  const cur = await scope.db.students.get(id);
   if (!cur && (!authCtx || !isUUID(id))) throw new Error('Không tìm thấy học sinh');
   if (cur) {
-    await db.students.update(id, { ...cleaned, updatedAt: Date.now() });
-    await logActivity(cur.classId, 'student', `Cập nhật hồ sơ ${input.fullName.trim()}`);
+    await scope.db.students.update(id, { ...cleaned, updatedAt: Date.now() });
+    await logActivity(cur.classId, 'student', `Cập nhật hồ sơ ${input.fullName.trim()}`, scope.db);
   }
 }
 
-export async function bulkAddStudents(classId: string, inputs: StudentInput[]) {
+export async function bulkAddStudents(classId: string, inputs: StudentInput[], targetDb?: PinkDB) {
+  if (!classId || !classId.trim()) {
+    throw new Error('Vui lòng chọn hoặc tạo lớp học trước khi thêm học sinh.');
+  }
+
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const now = Date.now();
   const cleanedList = inputs.map((i) => cleanStudent(i));
 
   // Kiểm tra trùng mã trong lô nhập và với dữ liệu hiện có trước khi thực thi
-  const existing = new Set((await db.students.toArray()).map((s) => s.code.toUpperCase()));
+  const existing = new Set((await scope.db.students.toArray()).map((s) => s.code.toUpperCase()));
   for (const item of cleanedList) {
     if (existing.has(item.code)) throw new Error(`Mã ${item.code} đã tồn tại`);
     existing.add(item.code);
@@ -1308,6 +1967,28 @@ export async function bulkAddStudents(classId: string, inputs: StudentInput[]) {
   const rows: Student[] = [];
 
   if (authCtx && supabase && isUUID(classId)) {
+    // Đảm bảo lớp học tồn tại trên Supabase trước khi tạo học sinh hàng loạt
+    const { data: cloudCls, error: checkClsErr } = await supabase
+      .from('classes')
+      .select('id, teacher_id')
+      .eq('id', classId)
+      .maybeSingle();
+
+    if (!cloudCls && !checkClsErr) {
+      const localCls = await scope.db.classes.get(classId);
+      if (localCls) {
+        await supabase.from('classes').insert({
+          id: localCls.id,
+          name: localCls.name,
+          school_year: localCls.schoolYear,
+          teacher_id: authCtx.userId,
+          subject: localCls.subject || null,
+          note: localCls.note || null,
+          color: localCls.color,
+        });
+      }
+    }
+
     for (let idx = 0; idx < cleanedList.length; idx++) {
       const cleaned = cleanedList[idx];
       const { data: rpcRes, error: rpcErr } = await supabase.rpc('create_student_in_class', {
@@ -1321,10 +2002,19 @@ export async function bulkAddStudents(classId: string, inputs: StudentInput[]) {
         p_parent_name: cleaned.parentName ?? null,
         p_parent_phone: cleaned.parentPhone ?? null,
       });
+      scope.assertActive();
 
       if (rpcErr) {
-        if (rpcErr.code === '23505') {
-          throw new Error(`Mã ${cleaned.code} đã tồn tại`);
+        if (
+          rpcErr.code === '23505' ||
+          rpcErr.message.includes('Mã học sinh') ||
+          rpcErr.message.includes('already exists') ||
+          rpcErr.message.includes('duplicate key')
+        ) {
+          throw new Error(`Mã học sinh ${cleaned.code} đã tồn tại trên hệ thống`);
+        }
+        if (rpcErr.message.includes('Bạn không phải là giáo viên')) {
+          throw new Error('Quyền bị từ chối: Bạn không phải là giáo viên phụ trách lớp này trên máy chủ.');
         }
         throw new Error(rpcErr.message);
       }
@@ -1344,10 +2034,11 @@ export async function bulkAddStudents(classId: string, inputs: StudentInput[]) {
       });
     }
 
-    await trackCloudIds(authCtx.userId, { studentIds: rows.map((r) => r.id) });
-    await db.transaction('rw', db.students, db.activities, async () => {
-      await db.students.bulkPut(rows);
-      await logActivity(classId, 'student', `Nhập ${rows.length} học sinh từ Excel`);
+    await trackCloudIds(authCtx.userId, { studentIds: rows.map((r) => r.id) }, scope.db);
+    scope.assertActive();
+    await scope.db.transaction('rw', scope.db.students, scope.db.activities, async () => {
+      await scope.db.students.bulkPut(rows);
+      await logActivity(classId, 'student', `Nhập ${rows.length} học sinh từ Excel`, scope.db);
     });
     return rows.length;
   }
@@ -1363,16 +2054,18 @@ export async function bulkAddStudents(classId: string, inputs: StudentInput[]) {
     });
   }
 
-  await db.transaction('rw', db.students, db.activities, async () => {
-    await db.students.bulkAdd(rows);
-    await logActivity(classId, 'student', `Nhập ${rows.length} học sinh từ Excel`);
+  await scope.db.transaction('rw', scope.db.students, scope.db.activities, async () => {
+    await scope.db.students.bulkAdd(rows);
+    await logActivity(classId, 'student', `Nhập ${rows.length} học sinh từ Excel`, scope.db);
   });
   return rows.length;
 }
 
 /** Lưu trữ (xóa mềm) – có thể khôi phục */
-export async function archiveStudents(ids: string[]) {
+export async function archiveStudents(ids: string[], targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const uuidIds = ids.filter(isUUID);
 
   if (authCtx && supabase && uuidIds.length > 0) {
@@ -1381,20 +2074,23 @@ export async function archiveStudents(ids: string[]) {
       .update({ status: 'archived', updated_at: new Date().toISOString() })
       .in('id', uuidIds)
       .select('id');
+    scope.assertActive();
     if (updErr) throw new Error(updErr.message);
     if (!updatedRows || updatedRows.length !== uuidIds.length) {
       throw new Error('Không có quyền lưu trữ một hoặc nhiều học sinh đã chọn.');
     }
   }
 
-  const list = await db.students.bulkGet(ids);
-  await db.students.where('id').anyOf(ids).modify({ status: 'archived', updatedAt: Date.now() });
+  const list = await scope.db.students.bulkGet(ids);
+  await scope.db.students.where('id').anyOf(ids).modify({ status: 'archived', updatedAt: Date.now() });
   const first = list.find(Boolean);
-  if (first) await logActivity(first.classId, 'student', `Chuyển ${ids.length} học sinh vào mục lưu trữ`);
+  if (first) await logActivity(first.classId, 'student', `Chuyển ${ids.length} học sinh vào mục lưu trữ`, scope.db);
 }
 
-export async function restoreStudents(ids: string[]) {
+export async function restoreStudents(ids: string[], targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const uuidIds = ids.filter(isUUID);
 
   if (authCtx && supabase && uuidIds.length > 0) {
@@ -1403,21 +2099,24 @@ export async function restoreStudents(ids: string[]) {
       .update({ status: 'active', updated_at: new Date().toISOString() })
       .in('id', uuidIds)
       .select('id');
+    scope.assertActive();
     if (updErr) throw new Error(updErr.message);
     if (!updatedRows || updatedRows.length !== uuidIds.length) {
       throw new Error('Không có quyền khôi phục một hoặc nhiều học sinh đã chọn.');
     }
   }
 
-  const list = await db.students.bulkGet(ids);
-  await db.students.where('id').anyOf(ids).modify({ status: 'active', updatedAt: Date.now() });
+  const list = await scope.db.students.bulkGet(ids);
+  await scope.db.students.where('id').anyOf(ids).modify({ status: 'active', updatedAt: Date.now() });
   const first = list.find(Boolean);
-  if (first) await logActivity(first.classId, 'student', `Khôi phục ${ids.length} học sinh`);
+  if (first) await logActivity(first.classId, 'student', `Khôi phục ${ids.length} học sinh`, scope.db);
 }
 
 /** Xóa vĩnh viễn học sinh và dữ liệu liên quan */
-export async function deleteStudentsPermanently(ids: string[]) {
+export async function deleteStudentsPermanently(ids: string[], targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const uuidIds = ids.filter(isUUID);
 
   if (authCtx && supabase && uuidIds.length > 0) {
@@ -1426,27 +2125,41 @@ export async function deleteStudentsPermanently(ids: string[]) {
       .delete()
       .in('id', uuidIds)
       .select('id');
+    scope.assertActive();
     if (delErr) throw new Error(delErr.message);
     if (!deletedRows || deletedRows.length !== uuidIds.length) {
       throw new Error('Không có quyền xóa một hoặc nhiều học sinh đã chọn.');
     }
   }
 
-  const list = (await db.students.bulkGet(ids)).filter(Boolean) as Student[];
-  await db.transaction('rw', [db.students, db.attendance, db.transactions, db.comments, db.gamePicks, db.activities], async () => {
-    await db.attendance.where('studentId').anyOf(ids).delete();
-    await db.transactions.where('studentId').anyOf(ids).delete();
-    await db.comments.where('studentId').anyOf(ids).delete();
-    await db.gamePicks.filter((g) => ids.includes(g.studentId)).delete();
-    await db.students.bulkDelete(ids);
-    if (list[0]) await logActivity(list[0].classId, 'student', `Xóa vĩnh viễn ${list.length} học sinh`);
-  });
+  const list = (await scope.db.students.bulkGet(ids)).filter(Boolean) as Student[];
+  await scope.db.transaction(
+    'rw',
+    [
+      scope.db.students,
+      scope.db.attendance,
+      scope.db.transactions,
+      scope.db.comments,
+      scope.db.gamePicks,
+      scope.db.activities,
+    ],
+    async () => {
+      await scope.db.attendance.where('studentId').anyOf(ids).delete();
+      await scope.db.transactions.where('studentId').anyOf(ids).delete();
+      await scope.db.comments.where('studentId').anyOf(ids).delete();
+      await scope.db.gamePicks.filter((g) => ids.includes(g.studentId)).delete();
+      await scope.db.students.bulkDelete(ids);
+      if (list[0]) await logActivity(list[0].classId, 'student', `Xóa vĩnh viễn ${list.length} học sinh`, scope.db);
+    },
+  );
 }
 
 /** Chuyển lớp: lịch sử cũ vẫn nằm ở lớp cũ, học sinh bắt đầu dữ liệu mới ở lớp mới */
-export async function transferStudents(ids: string[], toClassId: string) {
+export async function transferStudents(ids: string[], toClassId: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const target = await db.classes.get(toClassId);
+  scope.assertActive();
+  const target = await scope.db.classes.get(toClassId);
   if (!target && (!authCtx || !isUUID(toClassId))) throw new Error('Lớp đích không tồn tại');
 
   const uuidIds = ids.filter(isUUID);
@@ -1464,6 +2177,7 @@ export async function transferStudents(ids: string[], toClassId: string) {
       .from('class_memberships')
       .upsert(upsertPayload, { onConflict: 'student_id,class_id' })
       .select('id');
+    scope.assertActive();
     if (linkErr) throw new Error(linkErr.message);
     if (!linkedRows || linkedRows.length !== uuidIds.length) {
       throw new Error('Không có quyền chuyển học sinh sang lớp đích.');
@@ -1475,14 +2189,15 @@ export async function transferStudents(ids: string[], toClassId: string) {
       .in('student_id', uuidIds)
       .neq('class_id', toClassId)
       .eq('is_active', true);
+    scope.assertActive();
     if (deactErr) throw new Error(deactErr.message);
   }
 
-  const list = (await db.students.bulkGet(ids)).filter(Boolean) as Student[];
-  await db.students.where('id').anyOf(ids).modify({ classId: toClassId, updatedAt: Date.now() });
+  const list = (await scope.db.students.bulkGet(ids)).filter(Boolean) as Student[];
+  await scope.db.students.where('id').anyOf(ids).modify({ classId: toClassId, updatedAt: Date.now() });
   if (list[0]) {
-    await logActivity(list[0].classId, 'student', `Chuyển ${list.length} học sinh sang lớp ${target?.name ?? ''}`);
-    await logActivity(toClassId, 'student', `Nhận ${list.length} học sinh chuyển đến`);
+    await logActivity(list[0].classId, 'student', `Chuyển ${list.length} học sinh sang lớp ${target?.name ?? ''}`, scope.db);
+    await logActivity(toClassId, 'student', `Nhận ${list.length} học sinh chuyển đến`, scope.db);
   }
 }
 
@@ -1501,13 +2216,16 @@ export async function saveAttendance(
   date: string,
   session: Session,
   entries: { studentId: string; status: AttendanceStatus; note?: string }[],
+  targetDb?: PinkDB,
 ) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   if (!isValidISODate(date)) throw new Error('Ngày điểm danh không hợp lệ');
   if (session !== 'morning' && session !== 'afternoon') throw new Error('Buổi điểm danh không hợp lệ');
   if (!entries.length) throw new Error('Danh sách điểm danh trống');
 
-  const localCls = await db.classes.get(classId);
+  const localCls = await scope.db.classes.get(classId);
   if (!isUUID(classId) && !localCls) {
     throw new Error('Mã lớp học không hợp lệ hoặc không tồn tại.');
   }
@@ -1520,7 +2238,7 @@ export async function saveAttendance(
     }
   } else {
     // Đối với lớp Offline cục bộ: kiểm tra học sinh phải thuộc đúng lớp
-    const localStudents = await db.students.bulkGet(entries.map((e) => e.studentId));
+    const localStudents = await scope.db.students.bulkGet(entries.map((e) => e.studentId));
     for (const st of localStudents) {
       if (!st || st.classId !== classId) {
         throw new Error('Học sinh không tồn tại hoặc không thuộc lớp học này.');
@@ -1557,17 +2275,21 @@ export async function saveAttendance(
         .from('attendance')
         .upsert(cloudPayload, { onConflict: 'class_id,student_id,date,session' })
         .select('id');
+      scope.assertActive();
 
       if (attErr) {
         if (isNetworkOrOfflineError(attErr)) {
-          await enqueuePendingSyncItem({
-            key: `att:${classId}:${date}:${session}`,
-            kind: 'attendance_upsert',
-            classId,
-            date,
-            session,
-            createdAt: now,
-          });
+          await enqueuePendingSyncItem(
+            {
+              key: `att:${classId}:${date}:${session}`,
+              kind: 'attendance_upsert',
+              classId,
+              date,
+              session,
+              createdAt: now,
+            },
+            scope.db,
+          );
         } else {
           throw new Error(attErr.message);
         }
@@ -1575,24 +2297,29 @@ export async function saveAttendance(
         if (!upsertedRows || upsertedRows.length !== entries.length) {
           throw new Error('Không có quyền lưu điểm danh cho lớp hoặc học sinh này.');
         }
-        await trackCloudIds(authCtx.userId, { attendanceIds: rows.map((r) => r.id) });
+        await trackCloudIds(authCtx.userId, { attendanceIds: rows.map((r) => r.id) }, scope.db);
+        scope.assertActive();
       }
     } catch (err) {
+      scope.assertActive();
       if (isNetworkOrOfflineError(err)) {
-        await enqueuePendingSyncItem({
-          key: `att:${classId}:${date}:${session}`,
-          kind: 'attendance_upsert',
-          classId,
-          date,
-          session,
-          createdAt: now,
-        });
+        await enqueuePendingSyncItem(
+          {
+            key: `att:${classId}:${date}:${session}`,
+            kind: 'attendance_upsert',
+            classId,
+            date,
+            session,
+            createdAt: now,
+          },
+          scope.db,
+        );
       } else {
         throw err;
       }
     }
   } else if (!authCtx && isUUID(classId)) {
-    const localStudents = await db.students.bulkGet(entries.map((e) => e.studentId));
+    const localStudents = await scope.db.students.bulkGet(entries.map((e) => e.studentId));
     for (const st of localStudents) {
       if (!st || st.classId !== classId) {
         throw new Error('Học sinh không tồn tại hoặc không thuộc lớp học này.');
@@ -1600,18 +2327,21 @@ export async function saveAttendance(
     }
   }
 
-  const existed = await db.attendance.where('[classId+date+session]').equals([classId, date, session]).count();
-  await db.attendance.bulkPut(rows);
+  const existed = await scope.db.attendance.where('[classId+date+session]').equals([classId, date, session]).count();
+  await scope.db.attendance.bulkPut(rows);
   const absent = rows.filter((r) => r.status === 'excused' || r.status === 'unexcused').length;
   await logActivity(
     classId,
     'attendance',
     `${existed ? 'Cập nhật' : 'Điểm danh'} buổi ${session === 'morning' ? 'sáng' : 'chiều'} ${date.split('-').reverse().join('/')}: vắng ${absent}`,
+    scope.db,
   );
 }
 
-export async function clearAttendance(classId: string, date: string, session: Session) {
+export async function clearAttendance(classId: string, date: string, session: Session, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   if (authCtx && supabase && isUUID(classId)) {
     try {
       const { error } = await supabase
@@ -1620,38 +2350,46 @@ export async function clearAttendance(classId: string, date: string, session: Se
         .eq('class_id', classId)
         .eq('date', date)
         .eq('session', session);
+      scope.assertActive();
       if (error) {
         if (isNetworkOrOfflineError(error)) {
-          await enqueuePendingSyncItem({
+          await enqueuePendingSyncItem(
+            {
+              key: `att_clear:${classId}:${date}:${session}`,
+              kind: 'attendance_clear',
+              classId,
+              date,
+              session,
+              createdAt: Date.now(),
+            },
+            scope.db,
+          );
+        } else {
+          throw new Error(error.message);
+        }
+      }
+    } catch (err) {
+      scope.assertActive();
+      if (isNetworkOrOfflineError(err)) {
+        await enqueuePendingSyncItem(
+          {
             key: `att_clear:${classId}:${date}:${session}`,
             kind: 'attendance_clear',
             classId,
             date,
             session,
             createdAt: Date.now(),
-          });
-        } else {
-          throw new Error(error.message);
-        }
-      }
-    } catch (err) {
-      if (isNetworkOrOfflineError(err)) {
-        await enqueuePendingSyncItem({
-          key: `att_clear:${classId}:${date}:${session}`,
-          kind: 'attendance_clear',
-          classId,
-          date,
-          session,
-          createdAt: Date.now(),
-        });
+          },
+          scope.db,
+        );
       } else {
         throw err;
       }
     }
   }
 
-  await db.attendance.where('[classId+date+session]').equals([classId, date, session]).delete();
-  await logActivity(classId, 'attendance', `Xóa điểm danh ngày ${date.split('-').reverse().join('/')}`);
+  await scope.db.attendance.where('[classId+date+session]').equals([classId, date, session]).delete();
+  await logActivity(classId, 'attendance', `Xóa điểm danh ngày ${date.split('-').reverse().join('/')}`, scope.db);
 }
 
 /* ---------------- Criteria ---------------- */
@@ -1674,8 +2412,10 @@ export function validateCriterion(i: CriterionInput) {
   return e;
 }
 
-export async function saveCriterion(classId: string, input: CriterionInput, id?: string) {
+export async function saveCriterion(classId: string, input: CriterionInput, id?: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const e = validateCriterion(input);
   if (Object.keys(e).length) throw new ValidationError(e);
 
@@ -1691,14 +2431,15 @@ export async function saveCriterion(classId: string, input: CriterionInput, id?:
         })
         .eq('id', id)
         .select('id');
+      scope.assertActive();
       if (updErr) throw new Error(updErr.message);
       if (!updatedRows || updatedRows.length === 0) {
         throw new Error('Không tìm thấy tiêu chí hoặc bạn không có quyền chỉnh sửa tiêu chí này.');
       }
     }
-    await db.criteria.update(id, { name: input.name.trim(), points: input.points, type: input.type, icon: input.icon });
+    await scope.db.criteria.update(id, { name: input.name.trim(), points: input.points, type: input.type, icon: input.icon });
   } else {
-    const max = (await db.criteria.where('classId').equals(classId).toArray()).reduce((m, c) => Math.max(m, c.order), -1);
+    const max = (await scope.db.criteria.where('classId').equals(classId).toArray()).reduce((m, c) => Math.max(m, c.order), -1);
     const newId = uuidv4();
     const order = max + 1;
 
@@ -1713,11 +2454,13 @@ export async function saveCriterion(classId: string, input: CriterionInput, id?:
         display_order: order,
         archived: false,
       });
+      scope.assertActive();
       if (insErr) throw new Error(insErr.message);
-      await trackCloudIds(authCtx.userId, { criterionIds: [newId] });
+      await trackCloudIds(authCtx.userId, { criterionIds: [newId] }, scope.db);
+      scope.assertActive();
     }
 
-    await db.criteria.put({
+    await scope.db.criteria.put({
       id: newId,
       classId,
       ...input,
@@ -1729,15 +2472,18 @@ export async function saveCriterion(classId: string, input: CriterionInput, id?:
 }
 
 /** Tiêu chí đã dùng thì ẩn (archived) thay vì xóa để giữ lịch sử */
-export async function removeCriterion(id: string) {
+export async function removeCriterion(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  let used = await db.transactions.filter((t) => t.criterionId === id).count();
+  scope.assertActive();
+  let used = await scope.db.transactions.filter((t) => t.criterionId === id).count();
 
   if (authCtx && supabase && isUUID(id)) {
     const { count: cloudUsed, error: cntErr } = await supabase
       .from('student_points')
       .select('id', { count: 'exact', head: true })
       .eq('criterion_id', id);
+    scope.assertActive();
     if (!cntErr && typeof cloudUsed === 'number') {
       used = Math.max(used, cloudUsed);
     }
@@ -1748,6 +2494,7 @@ export async function removeCriterion(id: string) {
         .update({ archived: true })
         .eq('id', id)
         .select('id');
+      scope.assertActive();
       if (updErr) throw new Error(updErr.message);
       if (!updRows || updRows.length === 0) {
         throw new Error('Không tìm thấy tiêu chí hoặc bạn không có quyền ẩn tiêu chí này.');
@@ -1758,6 +2505,7 @@ export async function removeCriterion(id: string) {
         .delete()
         .eq('id', id)
         .select('id');
+      scope.assertActive();
       if (delErr) throw new Error(delErr.message);
       if (!delRows || delRows.length === 0) {
         throw new Error('Không tìm thấy tiêu chí hoặc bạn không có quyền xóa tiêu chí này.');
@@ -1765,21 +2513,28 @@ export async function removeCriterion(id: string) {
     }
   }
 
-  if (used > 0) await db.criteria.update(id, { archived: true });
-  else await db.criteria.delete(id);
+  if (used > 0) await scope.db.criteria.update(id, { archived: true });
+  else await scope.db.criteria.delete(id);
 }
 
 /* ---------------- Points ---------------- */
 
-export async function awardPoints(opts: {
-  classId: string;
-  studentIds: string[];
-  criterion?: Criterion | null;
-  customName?: string;
-  delta?: number;
-  note?: string;
-}) {
+export async function awardPoints(
+  opts: {
+    classId: string;
+    studentIds: string[];
+    criterion?: Criterion | null;
+    customName?: string;
+    delta?: number;
+    note?: string;
+    targetDb?: PinkDB;
+  },
+  explicitDb?: PinkDB,
+) {
+  const targetDb = explicitDb ?? opts.targetDb;
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const { classId, studentIds } = opts;
   if (!studentIds.length) throw new Error('Chưa chọn học sinh nào');
   const delta = opts.criterion ? opts.criterion.points : Number(opts.delta);
@@ -1789,7 +2544,7 @@ export async function awardPoints(opts: {
   }
   if (!name) throw new Error('Vui lòng nhập lý do');
 
-  const localCls = await db.classes.get(classId);
+  const localCls = await scope.db.classes.get(classId);
   if (!isUUID(classId) && !localCls) {
     throw new Error('Mã lớp học không hợp lệ hoặc không tồn tại.');
   }
@@ -1808,7 +2563,7 @@ export async function awardPoints(opts: {
     }
   }
 
-  const localStudents = await db.students.bulkGet(studentIds);
+  const localStudents = await scope.db.students.bulkGet(studentIds);
   const valid = localStudents.filter(
     (s): s is Student => !!s && s.classId === classId && s.status === 'active',
   );
@@ -1818,7 +2573,7 @@ export async function awardPoints(opts: {
     throw new Error('Không có học sinh hợp lệ trong lớp');
   }
 
-  const actor = authCtx?.fullName || (await actorName());
+  const actor = authCtx?.fullName || (await actorName(scope.db));
   const batchId = uuidv4();
   const now = Date.now();
   const targetStudentIds = valid.length === studentIds.length ? valid.map((s) => s.id) : studentIds;
@@ -1858,16 +2613,20 @@ export async function awardPoints(opts: {
         .from('student_points')
         .upsert(cloudRows, { onConflict: 'id' })
         .select('id');
+      scope.assertActive();
 
       if (ptsErr) {
         if (isNetworkOrOfflineError(ptsErr)) {
           for (const r of rows) {
-            await enqueuePendingSyncItem({
-              key: `pts:${r.id}`,
-              kind: 'points_upsert',
-              txId: r.id,
-              createdAt: now,
-            });
+            await enqueuePendingSyncItem(
+              {
+                key: `pts:${r.id}`,
+                kind: 'points_upsert',
+                txId: r.id,
+                createdAt: now,
+              },
+              scope.db,
+            );
           }
         } else {
           throw new Error(ptsErr.message);
@@ -1876,17 +2635,22 @@ export async function awardPoints(opts: {
         if (!upsertedRows || upsertedRows.length !== rows.length) {
           throw new Error('Không có quyền chấm điểm cho lớp hoặc học sinh này.');
         }
-        await trackCloudIds(authCtx.userId, { transactionIds: rows.map((r) => r.id) });
+        await trackCloudIds(authCtx.userId, { transactionIds: rows.map((r) => r.id) }, scope.db);
+        scope.assertActive();
       }
     } catch (err) {
+      scope.assertActive();
       if (isNetworkOrOfflineError(err)) {
         for (const r of rows) {
-          await enqueuePendingSyncItem({
-            key: `pts:${r.id}`,
-            kind: 'points_upsert',
-            txId: r.id,
-            createdAt: now,
-          });
+          await enqueuePendingSyncItem(
+            {
+              key: `pts:${r.id}`,
+              kind: 'points_upsert',
+              txId: r.id,
+              createdAt: now,
+            },
+            scope.db,
+          );
         }
       } else {
         throw err;
@@ -1894,15 +2658,17 @@ export async function awardPoints(opts: {
     }
   }
 
-  await db.transactions.bulkPut(rows);
+  await scope.db.transactions.bulkPut(rows);
   const who = valid.length === 1 ? valid[0].fullName : `${rows.length} học sinh`;
-  await logActivity(classId, 'points', `${delta > 0 ? '+' : ''}${delta} điểm "${name}" cho ${who}`);
+  await logActivity(classId, 'points', `${delta > 0 ? '+' : ''}${delta} điểm "${name}" cho ${who}`, scope.db);
   return { batchId, count: rows.length, transactionIds: rows.map((r) => r.id) };
 }
 
-export async function undoTransaction(id: string) {
+export async function undoTransaction(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const t = await db.transactions.get(id);
+  scope.assertActive();
+  const t = await scope.db.transactions.get(id);
   if (!t || t.undone) return;
   const now = Date.now();
 
@@ -1913,9 +2679,10 @@ export async function undoTransaction(id: string) {
         .update({ undone: true, undone_at: new Date(now).toISOString() })
         .eq('id', id)
         .select('id');
+      scope.assertActive();
       if (updErr) {
         if (isNetworkOrOfflineError(updErr)) {
-          await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: now });
+          await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: now }, scope.db);
         } else {
           throw new Error(updErr.message);
         }
@@ -1923,21 +2690,24 @@ export async function undoTransaction(id: string) {
         throw new Error('Không tìm thấy giao dịch điểm hoặc bạn không có quyền hoàn tác.');
       }
     } catch (err) {
+      scope.assertActive();
       if (isNetworkOrOfflineError(err)) {
-        await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: now });
+        await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: now }, scope.db);
       } else {
         throw err;
       }
     }
   }
 
-  await db.transactions.update(id, { undone: true, undoneAt: now });
-  await logActivity(t.classId, 'points', `Hoàn tác ${t.delta > 0 ? '+' : ''}${t.delta} điểm "${t.criterionName}"`);
+  await scope.db.transactions.update(id, { undone: true, undoneAt: now });
+  await logActivity(t.classId, 'points', `Hoàn tác ${t.delta > 0 ? '+' : ''}${t.delta} điểm "${t.criterionName}"`, scope.db);
 }
 
-export async function undoBatch(batchId: string) {
+export async function undoBatch(batchId: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const list = await db.transactions.where('batchId').equals(batchId).toArray();
+  scope.assertActive();
+  const list = await scope.db.transactions.where('batchId').equals(batchId).toArray();
   const live = list.filter((t) => !t.undone);
   if (!live.length) return;
   const now = Date.now();
@@ -1949,10 +2719,11 @@ export async function undoBatch(batchId: string) {
         .update({ undone: true, undone_at: new Date(now).toISOString() })
         .eq('batch_id', batchId)
         .select('id');
+      scope.assertActive();
       if (updErr) {
         if (isNetworkOrOfflineError(updErr)) {
           for (const t of live) {
-            await enqueuePendingSyncItem({ key: `pts:${t.id}`, kind: 'points_upsert', txId: t.id, createdAt: now });
+            await enqueuePendingSyncItem({ key: `pts:${t.id}`, kind: 'points_upsert', txId: t.id, createdAt: now }, scope.db);
           }
         } else {
           throw new Error(updErr.message);
@@ -1961,9 +2732,10 @@ export async function undoBatch(batchId: string) {
         throw new Error('Không tìm thấy lượt chấm điểm hoặc bạn không có quyền hoàn tác.');
       }
     } catch (err) {
+      scope.assertActive();
       if (isNetworkOrOfflineError(err)) {
         for (const t of live) {
-          await enqueuePendingSyncItem({ key: `pts:${t.id}`, kind: 'points_upsert', txId: t.id, createdAt: now });
+          await enqueuePendingSyncItem({ key: `pts:${t.id}`, kind: 'points_upsert', txId: t.id, createdAt: now }, scope.db);
         }
       } else {
         throw err;
@@ -1971,13 +2743,15 @@ export async function undoBatch(batchId: string) {
     }
   }
 
-  await db.transactions.bulkPut(live.map((t) => ({ ...t, undone: true, undoneAt: now })));
-  await logActivity(live[0].classId, 'points', `Hoàn tác lượt chấm "${live[0].criterionName}" (${live.length} học sinh)`);
+  await scope.db.transactions.bulkPut(live.map((t) => ({ ...t, undone: true, undoneAt: now })));
+  await logActivity(live[0].classId, 'points', `Hoàn tác lượt chấm "${live[0].criterionName}" (${live.length} học sinh)`, scope.db);
 }
 
-export async function redoTransaction(id: string) {
+export async function redoTransaction(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const t = await db.transactions.get(id);
+  scope.assertActive();
+  const t = await scope.db.transactions.get(id);
   if (!t || !t.undone) return;
 
   if (authCtx && supabase && isUUID(id)) {
@@ -1987,9 +2761,10 @@ export async function redoTransaction(id: string) {
         .update({ undone: false, undone_at: null })
         .eq('id', id)
         .select('id');
+      scope.assertActive();
       if (updErr) {
         if (isNetworkOrOfflineError(updErr)) {
-          await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: Date.now() });
+          await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: Date.now() }, scope.db);
         } else {
           throw new Error(updErr.message);
         }
@@ -1997,15 +2772,16 @@ export async function redoTransaction(id: string) {
         throw new Error('Không tìm thấy giao dịch điểm hoặc bạn không có quyền khôi phục.');
       }
     } catch (err) {
+      scope.assertActive();
       if (isNetworkOrOfflineError(err)) {
-        await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: Date.now() });
+        await enqueuePendingSyncItem({ key: `pts:${id}`, kind: 'points_upsert', txId: id, createdAt: Date.now() }, scope.db);
       } else {
         throw err;
       }
     }
   }
 
-  await db.transactions.update(id, { undone: false, undoneAt: undefined });
+  await scope.db.transactions.update(id, { undone: false, undoneAt: undefined });
 }
 
 /* ---------------- Comments ---------------- */
@@ -2019,8 +2795,15 @@ export interface CommentInput {
   status?: StudentComment['status'];
 }
 
-export async function saveComment(classId: string, input: CommentInput, id?: string): Promise<StudentComment> {
+export async function saveComment(
+  classId: string,
+  input: CommentInput,
+  id?: string,
+  targetDb?: PinkDB,
+): Promise<StudentComment> {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   const e: Record<string, string> = {};
   if (!input.studentId) e.studentId = 'Vui lòng chọn học sinh';
   if (!isValidISODate(input.date)) e.date = 'Ngày không hợp lệ';
@@ -2028,7 +2811,7 @@ export async function saveComment(classId: string, input: CommentInput, id?: str
   else if (input.content.length > 2000) e.content = 'Nhận xét tối đa 2000 ký tự';
   if (Object.keys(e).length) throw new ValidationError(e);
 
-  const localCls = await db.classes.get(classId);
+  const localCls = await scope.db.classes.get(classId);
   if (!isUUID(classId) && !localCls) {
     throw new Error('Mã lớp học không hợp lệ hoặc không tồn tại.');
   }
@@ -2042,7 +2825,7 @@ export async function saveComment(classId: string, input: CommentInput, id?: str
     }
   }
 
-  const student = await db.students.get(input.studentId);
+  const student = await scope.db.students.get(input.studentId);
   if (student && student.classId !== classId) {
     throw new Error('Học sinh không thuộc lớp học này.');
   }
@@ -2050,7 +2833,7 @@ export async function saveComment(classId: string, input: CommentInput, id?: str
     throw new Error('Học sinh không tồn tại trong lớp.');
   }
 
-  const existing = id ? await db.comments.get(id) : undefined;
+  const existing = id ? await scope.db.comments.get(id) : undefined;
   const status: StudentComment['status'] = input.status ?? 'sent';
 
   // Kiểm tra quy tắc bất biến đối với nhận xét đã gửi (khớp với trigger handle_comment_status_and_consistency)
@@ -2093,15 +2876,19 @@ export async function saveComment(classId: string, input: CommentInput, id?: str
           .update(updatePayload)
           .eq('id', id)
           .select('id, status, sent_at');
+        scope.assertActive();
 
         if (cmtErr) {
           if (isNetworkOrOfflineError(cmtErr)) {
-            await enqueuePendingSyncItem({
-              key: `cmt:${id}`,
-              kind: 'comment_upsert',
-              commentId: id,
-              createdAt: now,
-            });
+            await enqueuePendingSyncItem(
+              {
+                key: `cmt:${id}`,
+                kind: 'comment_upsert',
+                commentId: id,
+                createdAt: now,
+              },
+              scope.db,
+            );
           } else {
             throw new Error(cmtErr.message);
           }
@@ -2133,15 +2920,19 @@ export async function saveComment(classId: string, input: CommentInput, id?: str
             { onConflict: 'id' },
           )
           .select('id, status, sent_at');
+        scope.assertActive();
 
         if (cmtErr) {
           if (isNetworkOrOfflineError(cmtErr)) {
-            await enqueuePendingSyncItem({
-              key: `cmt:${commentId}`,
-              kind: 'comment_upsert',
-              commentId,
-              createdAt: now,
-            });
+            await enqueuePendingSyncItem(
+              {
+                key: `cmt:${commentId}`,
+                kind: 'comment_upsert',
+                commentId,
+                createdAt: now,
+              },
+              scope.db,
+            );
           } else if (cmtErr.code === '23505') {
             throw new ValidationError({ date: 'Học sinh đã có nhận xét trong ngày này' });
           } else {
@@ -2153,17 +2944,22 @@ export async function saveComment(classId: string, input: CommentInput, id?: str
           }
           const row0 = insertedRows[0] as { sent_at?: string | null };
           if (row0?.sent_at) sentAt = new Date(row0.sent_at).getTime();
-          await trackCloudIds(authCtx.userId, { commentIds: [commentId] });
+          await trackCloudIds(authCtx.userId, { commentIds: [commentId] }, scope.db);
+          scope.assertActive();
         }
       }
     } catch (err) {
+      scope.assertActive();
       if (isNetworkOrOfflineError(err)) {
-        await enqueuePendingSyncItem({
-          key: `cmt:${commentId}`,
-          kind: 'comment_upsert',
-          commentId,
-          createdAt: now,
-        });
+        await enqueuePendingSyncItem(
+          {
+            key: `cmt:${commentId}`,
+            kind: 'comment_upsert',
+            commentId,
+            createdAt: now,
+          },
+          scope.db,
+        );
       } else {
         throw err;
       }
@@ -2184,18 +2980,21 @@ export async function saveComment(classId: string, input: CommentInput, id?: str
     updatedAt: now,
   };
 
-  await db.comments.put(savedRecord);
+  await scope.db.comments.put(savedRecord);
   await logActivity(
     classId,
     'comment',
     `${id ? 'Sửa' : 'Ghi'} nhận xét cho ${student?.fullName ?? ''}`,
+    scope.db,
   );
   return savedRecord;
 }
 
-export async function deleteComment(id: string) {
+export async function deleteComment(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const existing = await db.comments.get(id);
+  scope.assertActive();
+  const existing = await scope.db.comments.get(id);
 
   // Bảo vệ lưu trữ sư phạm: Giáo viên không được xóa nhận xét đã gửi
   if (existing && (existing.status ?? 'sent') === 'sent' && authCtx?.role !== 'admin') {
@@ -2209,14 +3008,18 @@ export async function deleteComment(id: string) {
         .delete()
         .eq('id', id)
         .select('id');
+      scope.assertActive();
       if (delErr) {
         if (isNetworkOrOfflineError(delErr)) {
-          await enqueuePendingSyncItem({
-            key: `cmt_del:${id}`,
-            kind: 'comment_delete',
-            commentId: id,
-            createdAt: Date.now(),
-          });
+          await enqueuePendingSyncItem(
+            {
+              key: `cmt_del:${id}`,
+              kind: 'comment_delete',
+              commentId: id,
+              createdAt: Date.now(),
+            },
+            scope.db,
+          );
         } else {
           throw new Error(delErr.message);
         }
@@ -2224,20 +3027,24 @@ export async function deleteComment(id: string) {
         throw new Error('Không tìm thấy nhận xét hoặc bạn không có quyền xóa nhận xét này.');
       }
     } catch (err) {
+      scope.assertActive();
       if (isNetworkOrOfflineError(err)) {
-        await enqueuePendingSyncItem({
-          key: `cmt_del:${id}`,
-          kind: 'comment_delete',
-          commentId: id,
-          createdAt: Date.now(),
-        });
+        await enqueuePendingSyncItem(
+          {
+            key: `cmt_del:${id}`,
+            kind: 'comment_delete',
+            commentId: id,
+            createdAt: Date.now(),
+          },
+          scope.db,
+        );
       } else {
         throw err;
       }
     }
   }
 
-  await db.comments.delete(id);
+  await scope.db.comments.delete(id);
 }
 
 /* ---------------- Parent Links & Parent Portal ---------------- */
@@ -2272,7 +3079,9 @@ async function issueCloudParentInvitationToken(
   classId: string,
   studentId: string,
   opts?: { expiresAtMs?: number },
+  targetDb?: PinkDB,
 ): Promise<ParentLink> {
+  const scope = getOperationScope(targetDb);
   if (!supabase) {
     throw new Error('Chưa cấu hình kết nối Supabase.');
   }
@@ -2283,7 +3092,7 @@ async function issueCloudParentInvitationToken(
     throw new Error('Mã định danh học sinh không hợp lệ (không được gửi ID cục bộ lên Cloud).');
   }
 
-  const localStudent = await db.students.get(studentId);
+  const localStudent = await scope.db.students.get(studentId);
   if (localStudent && (localStudent.classId !== classId || localStudent.status !== 'active')) {
     throw new Error('Học sinh không thuộc lớp học này hoặc đã ngừng theo học.');
   }
@@ -2297,6 +3106,7 @@ async function issueCloudParentInvitationToken(
     .eq('class_id', classId)
     .eq('student_id', studentId)
     .eq('is_revoked', false);
+  scope.assertActive();
 
   if (listErr) {
     throw new Error(listErr.message || 'Không thể kiểm tra danh sách mã mời hiện có.');
@@ -2308,6 +3118,7 @@ async function issueCloudParentInvitationToken(
       const { data: revData, error: revErr } = await supabase.rpc('revoke_parent_invitation', {
         p_token_id: oldTok.id as string,
       });
+      scope.assertActive();
       if (revErr) {
         throw new Error(revErr.message || 'Không thể thu hồi mã mời cũ.');
       }
@@ -2337,6 +3148,7 @@ async function issueCloudParentInvitationToken(
     .select(
       'id, class_id, student_id, token_hash, parent_phone, expires_at, is_revoked, revoked_at, used_at, used_by, created_at, updated_at',
     );
+  scope.assertActive();
 
   if (insErr) {
     throw new Error(insErr.message || 'Không thể tạo mã mời phụ huynh.');
@@ -2362,12 +3174,12 @@ async function issueCloudParentInvitationToken(
     updatedAt: row0.updated_at ? new Date(row0.updated_at as string).getTime() : now,
   };
 
-  const oldLocalLinks = await db.parentLinks.where('[classId+studentId]').equals([classId, studentId]).toArray();
+  const oldLocalLinks = await scope.db.parentLinks.where('[classId+studentId]').equals([classId, studentId]).toArray();
   if (oldLocalLinks.length) {
-    await db.parentLinks.bulkDelete(oldLocalLinks.map((l) => l.id));
+    await scope.db.parentLinks.bulkDelete(oldLocalLinks.map((l) => l.id));
   }
-  await db.parentLinks.put(persistedLink);
-  await trackCloudIds(authCtx.userId, { parentLinkIds: [persistedLink.id] });
+  await scope.db.parentLinks.put(persistedLink);
+  await trackCloudIds(authCtx.userId, { parentLinkIds: [persistedLink.id] }, scope.db);
 
   // Chỉ trả về issuedRawToken 1 lần duy nhất trong bộ nhớ (RAM) để giáo viên sao chép gửi phụ huynh
   return {
@@ -2380,23 +3192,26 @@ export async function getOrCreateParentLink(
   classId: string,
   studentId: string,
   opts?: { expiresAtMs?: number },
+  targetDb?: PinkDB,
 ): Promise<ParentLink> {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const localCls = await db.classes.get(classId);
+  scope.assertActive();
+  const localCls = await scope.db.classes.get(classId);
   if (!isUUID(classId) && !localCls) {
     throw new Error('Mã lớp học không hợp lệ hoặc không tồn tại.');
   }
 
   if (authCtx && supabase && isUUID(classId)) {
-    return issueCloudParentInvitationToken(authCtx, classId, studentId, opts);
+    return issueCloudParentInvitationToken(authCtx, classId, studentId, opts, scope.db);
   }
 
-  const student = await db.students.get(studentId);
+  const student = await scope.db.students.get(studentId);
   if (!student || student.classId !== classId || student.status !== 'active') {
     throw new Error('Học sinh không tồn tại hoặc không thuộc lớp học này.');
   }
 
-  const existing = await db.parentLinks.where('[classId+studentId]').equals([classId, studentId]).first();
+  const existing = await scope.db.parentLinks.where('[classId+studentId]').equals([classId, studentId]).first();
   if (existing && !existing.isRevoked && (!existing.expiresAt || existing.expiresAt > Date.now())) {
     return existing;
   }
@@ -2417,7 +3232,7 @@ export async function getOrCreateParentLink(
     createdAt: now,
     updatedAt: now,
   };
-  await db.parentLinks.put(link);
+  await scope.db.parentLinks.put(link);
   return { ...link, issuedRawToken: rawToken };
 }
 
@@ -2425,23 +3240,26 @@ export async function regenerateParentLink(
   classId: string,
   studentId: string,
   opts?: { expiresAtMs?: number },
+  targetDb?: PinkDB,
 ): Promise<ParentLink> {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
-  const localCls = await db.classes.get(classId);
+  scope.assertActive();
+  const localCls = await scope.db.classes.get(classId);
   if (!isUUID(classId) && !localCls) {
     throw new Error('Mã lớp học không hợp lệ hoặc không tồn tại.');
   }
 
   if (authCtx && supabase && isUUID(classId)) {
-    return issueCloudParentInvitationToken(authCtx, classId, studentId, opts);
+    return issueCloudParentInvitationToken(authCtx, classId, studentId, opts, scope.db);
   }
 
-  const student = await db.students.get(studentId);
+  const student = await scope.db.students.get(studentId);
   if (!student || student.classId !== classId || student.status !== 'active') {
     throw new Error('Học sinh không tồn tại hoặc không thuộc lớp học này.');
   }
 
-  const existing = await db.parentLinks.where('[classId+studentId]').equals([classId, studentId]).first();
+  const existing = await scope.db.parentLinks.where('[classId+studentId]').equals([classId, studentId]).first();
   const now = Date.now();
   const newToken = generateSecureToken();
   const tokenHash = await sha256(newToken.trim());
@@ -2458,18 +3276,23 @@ export async function regenerateParentLink(
       usedBy: null,
       updatedAt: now,
     };
-    await db.parentLinks.put(updated);
+    await scope.db.parentLinks.put(updated);
     return { ...updated, issuedRawToken: newToken };
   }
-  return getOrCreateParentLink(classId, studentId, opts);
+  return getOrCreateParentLink(classId, studentId, opts, scope.db);
 }
 
 /**
  * Thu hồi mã mời phụ huynh qua RPC public.revoke_parent_invitation (chế độ Cloud)
  * hoặc cập nhật trạng thái thu hồi cục bộ (chế độ Offline).
  */
-export async function revokeParentInvitationToken(tokenId: string): Promise<{ ok: boolean; message: string }> {
+export async function revokeParentInvitationToken(
+  tokenId: string,
+  targetDb?: PinkDB,
+): Promise<{ ok: boolean; message: string }> {
+  const scope = getOperationScope(targetDb);
   const authCtx = await requireTeacherOrOfflineContext();
+  scope.assertActive();
   if (!tokenId) {
     throw new Error('Mã định danh token không hợp lệ.');
   }
@@ -2480,6 +3303,7 @@ export async function revokeParentInvitationToken(tokenId: string): Promise<{ ok
     const { data, error } = await supabase.rpc('revoke_parent_invitation', {
       p_token_id: tokenId,
     });
+    scope.assertActive();
     if (error) {
       throw new Error(error.message || 'Không thể thu hồi mã liên kết.');
     }
@@ -2488,9 +3312,9 @@ export async function revokeParentInvitationToken(tokenId: string): Promise<{ ok
       throw new Error(res?.message || 'Thu hồi mã liên kết thất bại.');
     }
 
-    const existing = await db.parentLinks.get(tokenId);
+    const existing = await scope.db.parentLinks.get(tokenId);
     if (existing) {
-      await db.parentLinks.update(tokenId, {
+      await scope.db.parentLinks.update(tokenId, {
         isRevoked: true,
         revokedAt: now,
         token: '',
@@ -2503,14 +3327,14 @@ export async function revokeParentInvitationToken(tokenId: string): Promise<{ ok
     };
   }
 
-  const existing = await db.parentLinks.get(tokenId);
+  const existing = await scope.db.parentLinks.get(tokenId);
   if (!existing) {
     throw new Error('Mã liên kết không tồn tại.');
   }
   if (existing.usedAt) {
     throw new Error('Mã liên kết này đã được phụ huynh sử dụng, không thể thu hồi.');
   }
-  await db.parentLinks.update(tokenId, {
+  await scope.db.parentLinks.update(tokenId, {
     isRevoked: true,
     revokedAt: now,
     token: '',
@@ -2522,14 +3346,40 @@ export async function revokeParentInvitationToken(tokenId: string): Promise<{ ok
   };
 }
 
-export async function recordParentLinkSent(id: string) {
-  await db.parentLinks.update(id, { lastSentAt: Date.now() });
+export async function recordParentLinkSent(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
+  await scope.db.parentLinks.update(id, { lastSentAt: Date.now() });
+}
+
+const CLAIM_RATE_LIMIT_MAX_ATTEMPTS = 5;
+const CLAIM_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const CLAIM_RATE_LIMIT_COOLDOWN_MS = 30 * 1000;
+
+interface ClaimRateLimitState {
+  failedAttempts: number;
+  firstFailedAt: number;
+  cooldownUntil: number;
+}
+
+let claimRateLimitState: ClaimRateLimitState = {
+  failedAttempts: 0,
+  firstFailedAt: 0,
+  cooldownUntil: 0,
+};
+
+export function resetClaimRateLimitForTesting(): void {
+  claimRateLimitState = {
+    failedAttempts: 0,
+    firstFailedAt: 0,
+    cooldownUntil: 0,
+  };
 }
 
 /**
  * Phụ huynh nhập mã mời (raw_token) để kích hoạt liên kết tài khoản với học sinh
  * qua RPC nguyên tử public.claim_parent_invitation(raw_token).
  * Tuyệt đối không ghi raw_token vào DB, console log hay thông báo lỗi.
+ * Tích hợp giới hạn tần suất thử sai (Rate limit & Cooldown) chống tấn công vét cạn.
  */
 export async function claimParentInvitationToken(rawToken: string): Promise<{
   ok: boolean;
@@ -2541,6 +3391,12 @@ export async function claimParentInvitationToken(rawToken: string): Promise<{
     throw new Error('Chưa cấu hình kết nối Supabase.');
   }
 
+  const now = Date.now();
+  if (now < claimRateLimitState.cooldownUntil) {
+    const remainingSeconds = Math.ceil((claimRateLimitState.cooldownUntil - now) / 1000);
+    throw new Error(`Bạn đã thử sai quá nhiều lần. Vui lòng chờ ${remainingSeconds} giây trước khi thử lại.`);
+  }
+
   const cleaned = (rawToken ?? '').trim();
   if (cleaned.length < 16) {
     throw new Error('Mã liên kết không đúng định dạng hoặc quá ngắn.');
@@ -2550,14 +3406,38 @@ export async function claimParentInvitationToken(rawToken: string): Promise<{
     raw_token: cleaned,
   });
 
-  if (error) {
-    throw new Error(error.message || 'Không thể xác minh mã liên kết.');
+  const result = data as { ok?: boolean; message?: string; student_id?: string; code?: string } | null;
+
+  if (result?.code === 'RATE_LIMITED') {
+    throw new Error(result.message || 'Bạn đã thử sai quá nhiều lần. Vui lòng chờ trước khi thử lại.');
   }
 
-  const result = data as { ok?: boolean; message?: string; student_id?: string } | null;
-  if (!result || result.ok !== true) {
+  if (error || !result || result.ok !== true) {
+    if (now - claimRateLimitState.firstFailedAt > CLAIM_RATE_LIMIT_WINDOW_MS) {
+      claimRateLimitState.failedAttempts = 1;
+      claimRateLimitState.firstFailedAt = now;
+    } else {
+      claimRateLimitState.failedAttempts += 1;
+    }
+
+    if (claimRateLimitState.failedAttempts >= CLAIM_RATE_LIMIT_MAX_ATTEMPTS) {
+      claimRateLimitState.cooldownUntil = now + CLAIM_RATE_LIMIT_COOLDOWN_MS;
+      const remainingSeconds = Math.ceil(CLAIM_RATE_LIMIT_COOLDOWN_MS / 1000);
+      throw new Error(`Bạn đã thử sai liên tiếp ${CLAIM_RATE_LIMIT_MAX_ATTEMPTS} lần. Vui lòng chờ ${remainingSeconds} giây trước khi thử lại.`);
+    }
+
+    if (error) {
+      throw new Error(error.message || 'Không thể xác minh mã liên kết.');
+    }
     throw new Error(result?.message || 'Mã liên kết không hợp lệ hoặc đã hết hiệu lực.');
   }
+
+  // Reset khi thành công
+  claimRateLimitState = {
+    failedAttempts: 0,
+    firstFailedAt: 0,
+    cooldownUntil: 0,
+  };
 
   return {
     ok: true,
@@ -2766,71 +3646,79 @@ export async function fetchParentPortalData(): Promise<ParentPortalStudentData[]
 
 /* ---------------- Tasks (hoạt động cần hoàn thành) ---------------- */
 
-export async function addTask(classId: string, title: string, dueDate?: string) {
+export async function addTask(classId: string, title: string, dueDate?: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   if (!title.trim()) throw new ValidationError({ title: 'Vui lòng nhập tên hoạt động' });
   if (title.trim().length > 120) throw new ValidationError({ title: 'Tối đa 120 ký tự' });
   const t: TodoTask = { id: uid('td_'), classId, title: title.trim(), dueDate: dueDate || undefined, done: false, createdAt: Date.now() };
-  await db.tasks.add(t);
+  await scope.db.tasks.add(t);
 }
 
-export async function toggleTask(id: string) {
-  const t = await db.tasks.get(id);
-  if (t) await db.tasks.update(id, { done: !t.done });
+export async function toggleTask(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
+  const t = await scope.db.tasks.get(id);
+  if (t) await scope.db.tasks.update(id, { done: !t.done });
 }
 
-export async function deleteTask(id: string) {
-  await db.tasks.delete(id);
+export async function deleteTask(id: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
+  await scope.db.tasks.delete(id);
 }
 
 /* ---------------- Game picks ---------------- */
 
-export async function saveGamePick(classId: string, student: Student, roundId: string) {
-  await db.gamePicks.add({
+export async function saveGamePick(classId: string, student: Student, roundId: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
+  await scope.db.gamePicks.add({
     id: uid('g_'),
     classId,
     studentId: student.id,
     studentName: student.fullName,
-    game: 'dog-chase',
+    game: 'ufo-beam',
     roundId,
     createdAt: Date.now(),
   });
-  await logActivity(classId, 'game', `Chú chó tinh nghịch chọn ${student.fullName}`);
+  await logActivity(classId, 'game', `UFO gắp học sinh ${student.fullName}`, scope.db);
 }
 
-export async function clearGamePicks(classId: string) {
-  await db.gamePicks.where('classId').equals(classId).delete();
+export async function clearGamePicks(classId: string, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
+  await scope.db.gamePicks.where('classId').equals(classId).delete();
 }
 
 /* ---------------- Backup ---------------- */
 
 export const BACKUP_FORMAT = 'pink-classroom-backup';
 
-export async function exportBackup() {
+export async function exportBackup(targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const data: Record<string, unknown[]> = {};
-  for (const t of ALL_TABLES) data[t] = await db.table(t).toArray();
+  for (const t of ALL_TABLES) data[t] = await scope.db.table(t).toArray();
   return { format: BACKUP_FORMAT, version: 1, exportedAt: new Date().toISOString(), data };
 }
 
-export async function importBackup(json: unknown) {
+export async function importBackup(json: unknown, targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
   const obj = json as { format?: string; data?: Record<string, unknown[]> };
   if (!obj || obj.format !== BACKUP_FORMAT || !obj.data) throw new Error('File không phải bản sao lưu Pink Classroom');
   for (const t of ALL_TABLES) {
     if (obj.data[t] !== undefined && !Array.isArray(obj.data[t])) throw new Error(`Dữ liệu bảng ${t} bị hỏng`);
   }
-  await db.transaction('rw', ALL_TABLES.map((t) => db.table(t)), async () => {
+  await scope.db.transaction('rw', ALL_TABLES.map((t) => scope.db.table(t)), async () => {
     for (const t of ALL_TABLES) {
-      await db.table(t).clear();
+      await scope.db.table(t).clear();
       const rows = obj.data![t];
-      if (rows?.length) await db.table(t).bulkAdd(rows);
+      if (rows?.length) await scope.db.table(t).bulkAdd(rows);
     }
   });
 }
 
-export async function wipeAll() {
-  await db.transaction('rw', ALL_TABLES.map((t) => db.table(t)), async () => {
+export async function wipeAll(targetDb?: PinkDB) {
+  const scope = getOperationScope(targetDb);
+  await scope.db.transaction('rw', ALL_TABLES.map((t) => scope.db.table(t)), async () => {
     for (const t of ALL_TABLES) {
       if (t === 'kv') continue;
-      await db.table(t).clear();
+      await scope.db.table(t).clear();
     }
   });
 }

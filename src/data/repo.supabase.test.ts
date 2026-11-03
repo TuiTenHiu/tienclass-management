@@ -1263,6 +1263,7 @@ import {
   redoTransaction,
   regenerateParentLink,
   removeCriterion,
+  resetClaimRateLimitForTesting,
   restoreStudents,
   revokeParentInvitationToken,
   saveAttendance,
@@ -1284,6 +1285,7 @@ async function clearLocalDb() {
 
 describe('Tích hợp Supabase Bước 3.1 – 3.4 (Auth, Lớp, Tiêu chí, Học sinh, Điểm danh, Điểm thi đua, Nhận xét tuần)', () => {
   beforeEach(async () => {
+    resetClaimRateLimitForTesting();
     resetMockCloud();
     await clearLocalDb();
   });
@@ -2161,5 +2163,44 @@ describe('Tích hợp Supabase Bước 3.1 – 3.4 (Auth, Lớp, Tiêu chí, H�
     expect(portalDataParent2[0].points[0].delta).toBe(2);
     expect(portalDataParent2[0].sentComments).toHaveLength(1);
     expect(portalDataParent2[0].sentComments[0].content).toBe('Nhận xét riêng của Khánh Linh.');
+  });
+
+  it('Bước 3.5.4: Giới hạn tần suất thử sai (Rate limit & Cooldown) khi claim token', async () => {
+    mockState.currentUserId = PARENT_ID;
+
+    // Thử 4 lần đầu: lỗi sai token thông thường
+    for (let i = 0; i < 4; i++) {
+      await expect(claimParentInvitationToken('wrong_code_test_123456')).rejects.toThrow(
+        /Mã liên kết không tồn tại/,
+      );
+    }
+
+    // Lần thứ 5: kích hoạt cooldown
+    await expect(claimParentInvitationToken('wrong_code_test_123456')).rejects.toThrow(
+      /Bạn đã thử sai liên tiếp 5 lần/,
+    );
+
+    // Lần thứ 6 (ngay lập tức trong thời gian cooldown): bị chặn ngay không gọi backend
+    await expect(claimParentInvitationToken('wrong_code_test_123456')).rejects.toThrow(
+      /Bạn đã thử sai quá nhiều lần. Vui lòng chờ/,
+    );
+  });
+
+  it('Bước 3.5.5: Hai tài khoản phụ huynh đồng thời claim cùng một mã mời', async () => {
+    mockState.currentUserId = TEACHER_A_ID;
+    const cl = await createClass({ name: 'Lớp 3A', schoolYear: '2026-2027', teacherName: 'Cô Tiên' });
+    const st = await addStudent(cl.id, { code: 'HS3A01', fullName: 'Đỗ Trọng Nghĩa', gender: 'male', avatar: 'cat-pink' });
+    const link = await getOrCreateParentLink(cl.id, st.id);
+
+    // Phụ huynh 1 claim thành công
+    mockState.currentUserId = PARENT_ID;
+    const res1 = await claimParentInvitationToken(link.issuedRawToken!);
+    expect(res1.ok).toBe(true);
+
+    // Phụ huynh 2 cố claim cùng mã đó -> Bị từ chối vì mã đã sử dụng
+    mockState.currentUserId = PARENT_2_ID;
+    await expect(claimParentInvitationToken(link.issuedRawToken!)).rejects.toThrow(
+      /Mã liên kết này đã được sử dụng/,
+    );
   });
 });

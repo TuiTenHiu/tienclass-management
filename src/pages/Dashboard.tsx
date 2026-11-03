@@ -1,6 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useLiveQuery } from 'dexie-react-hooks';
 import {
   Users,
   UserCheck,
@@ -18,12 +17,11 @@ import {
   Check,
 } from 'lucide-react';
 import { useApp } from '../state/AppContext';
-import { useActivities, useAttendance, useStudents, useTasks, useTransactions } from '../state/hooks';
-import { db } from '../data/db';
+import { useActivities, useActiveStudentCountsByClass, useAttendance, useStudents, useTasks, useTransactions } from '../state/hooks';
 import { addTask, deleteTask, toggleTask, ValidationError } from '../data/repo';
 import { StatCard } from '../components/StatCard';
 import { Card } from '../components/ui';
-import { EmptyState, LoadingState } from '../components/States';
+import { EmptyState, LoadingState, PageSkeleton } from '../components/States';
 import { StudentAvatar } from '../components/StudentAvatar';
 import { Illustration } from '../components/illustrations';
 import { useToast } from '../components/ToastNotification';
@@ -42,12 +40,7 @@ export default function Dashboard() {
   const txs = useTransactions(classId);
   const tasks = useTasks(classId);
   const activities = useActivities(classId, 7);
-  const classCounts = useLiveQuery(async () => {
-    const all = await db.students.where('status').equals('active').toArray();
-    const m = new Map<string, number>();
-    all.forEach((s) => m.set(s.classId, (m.get(s.classId) ?? 0) + 1));
-    return m;
-  }, []);
+  const classCounts = useActiveStudentCountsByClass();
 
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDue, setTaskDue] = useState('');
@@ -86,7 +79,7 @@ export default function Dashboard() {
   const classTotal = txs ? totalPoints(txs, undefined, activeIds) : 0;
   const pending = (tasks ?? []).filter((t) => !t.done);
 
-  if (!ready) return <LoadingState />;
+  if (!ready) return <PageSkeleton label="Đang chuẩn bị dữ liệu lớp học..." />;
 
   const hour = new Date().getHours();
   const greet = hour < 11 ? 'Chào buổi sáng' : hour < 14 ? 'Chào buổi trưa' : hour < 18 ? 'Chào buổi chiều' : 'Chào buổi tối';
@@ -109,27 +102,27 @@ export default function Dashboard() {
   return (
     <div className="space-y-6 animate-fadeIn">
       {/* Lời chào */}
-      <section className="relative overflow-hidden rounded-[26px] bg-gradient-to-r from-pink-100 via-[#FDEFF6] to-lavender/50 border border-pink-100 p-6 md:p-8">
+      <section className="relative overflow-hidden rounded-[20px] sm:rounded-[26px] bg-gradient-to-r from-pink-100 via-[#FDEFF6] to-lavender/50 border border-pink-100 p-4 sm:p-6 md:p-8">
         <div className="relative z-10 max-w-2xl">
-          <p className="text-pink-600 font-semibold text-sm">{formatDateVN(new Date(), true)}</p>
-          <h2 className="font-display font-black text-2xl md:text-[32px] leading-tight mt-1">
+          <p className="text-pink-600 font-semibold text-xs sm:text-sm">{formatDateVN(new Date(), true)}</p>
+          <h2 className="font-display font-black text-xl sm:text-2xl md:text-[32px] leading-tight mt-1">
             {greet}, {call}!
           </h2>
-          <p className="text-ink-soft mt-2 text-[15px] md:text-base">
+          <p className="text-ink-soft mt-1.5 sm:mt-2 text-[14px] sm:text-[15px] md:text-base">
             Chúc {pronoun} có một ngày dạy học thật vui nhé! {currentClass ? `Lớp ${currentClass.name} đang chờ ${pronoun} đó.` : ''}
           </p>
-          <div className="flex flex-wrap gap-2 mt-5">
+          <div className="flex flex-col sm:flex-row flex-wrap gap-2 mt-4 sm:mt-5">
             {currentClass ? (
               <>
-                <button className="btn-primary" onClick={() => navigate('/attendance')}>
+                <button className="btn-primary w-full sm:w-auto" onClick={() => navigate('/attendance')}>
                   <CalendarCheck className="w-[18px] h-[18px]" /> Điểm danh nhanh
                 </button>
-                <button className="btn-outline" onClick={() => navigate('/games/dog')}>
-                  <Dog className="w-[18px] h-[18px]" /> Chú chó chọn học sinh
+                <button className="btn-outline w-full sm:w-auto" onClick={() => navigate('/games/dog')}>
+                  <Dog className="w-[18px] h-[18px] text-pink-600" /> Chú chó đuổi bắt
                 </button>
               </>
             ) : (
-              <button className="btn-primary" onClick={() => navigate('/classes?new=1')}>
+              <button className="btn-primary w-full sm:w-auto" onClick={() => navigate('/classes?new=1')}>
                 <Plus className="w-[18px] h-[18px]" /> Tạo lớp học đầu tiên
               </button>
             )}
@@ -166,7 +159,7 @@ export default function Dashboard() {
       ) : (
         <>
           {/* Thẻ thống kê */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-2 xl:grid-cols-5 gap-2.5 sm:gap-4">
             <StatCard icon={Users} tone="pink" label="Tổng số học sinh" value={students ? students.length : '…'} hint={`Lớp ${currentClass.name}`} onClick={() => navigate('/students')} />
             <StatCard
               icon={UserCheck}
@@ -185,7 +178,9 @@ export default function Dashboard() {
               onClick={() => navigate('/attendance')}
             />
             <StatCard icon={Star} tone="lavender" label="Tổng điểm thi đua" value={txs ? classTotal : '…'} hint="Cả lớp, từ đầu đến nay" onClick={() => navigate('/points')} />
-            <StatCard icon={ListTodo} tone="sky" label="Hoạt động cần làm" value={tasks ? pending.length : '…'} hint={pending[0]?.title ?? 'Không có việc tồn đọng'} />
+            <div className="col-span-2 sm:col-span-1">
+              <StatCard icon={ListTodo} tone="sky" label="Hoạt động cần làm" value={tasks ? pending.length : '…'} hint={pending[0]?.title ?? 'Không có việc tồn đọng'} />
+            </div>
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
@@ -300,12 +295,14 @@ export default function Dashboard() {
 
             {/* Hoạt động cần hoàn thành */}
             <Card title="Hoạt động cần hoàn thành" icon={<ListTodo className="w-5 h-5 text-sky-dark" />}>
-              <form onSubmit={submitTask} className="flex gap-2 mb-3">
+              <form onSubmit={submitTask} className="flex flex-col sm:flex-row gap-2 mb-3">
                 <input className="input flex-1 min-w-0" placeholder="Ví dụ: Thu phiếu khảo sát..." value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} maxLength={120} aria-label="Tên hoạt động" />
-                <input type="date" className="input w-[140px] px-2" value={taskDue} onChange={(e) => setTaskDue(e.target.value)} aria-label="Hạn hoàn thành" data-tip="Hạn hoàn thành (không bắt buộc)" />
-                <button className="btn-primary px-3" disabled={!taskTitle.trim()} aria-label="Thêm hoạt động">
-                  <Plus className="w-5 h-5" />
-                </button>
+                <div className="flex gap-2">
+                  <input type="date" className="input flex-1 sm:w-[140px] px-2" value={taskDue} onChange={(e) => setTaskDue(e.target.value)} aria-label="Hạn hoàn thành" data-tip="Hạn hoàn thành (không bắt buộc)" />
+                  <button className="btn-primary px-4 shrink-0" disabled={!taskTitle.trim()} aria-label="Thêm hoạt động">
+                    <Plus className="w-5 h-5" />
+                  </button>
+                </div>
               </form>
               {tasks === undefined ? (
                 <LoadingState compact />

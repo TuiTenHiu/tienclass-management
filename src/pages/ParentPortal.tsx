@@ -259,10 +259,10 @@ export default function ParentPortalPage() {
               </div>
             </div>
 
-            <div className="flex gap-2 border-b border-pink-100 pb-3">
+            <div className="grid grid-cols-2 gap-2 border-b border-pink-100 pb-3">
               <button
                 type="button"
-                className={authMode === 'signin' ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}
+                className={`w-full justify-center ${authMode === 'signin' ? 'btn-primary btn-sm !min-h-[40px]' : 'btn-ghost btn-sm !min-h-[40px]'}`}
                 onClick={() => {
                   setAuthMode('signin');
                   setAuthError(null);
@@ -272,13 +272,13 @@ export default function ParentPortalPage() {
               </button>
               <button
                 type="button"
-                className={authMode === 'signup' ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}
+                className={`w-full justify-center ${authMode === 'signup' ? 'btn-primary btn-sm !min-h-[40px]' : 'btn-ghost btn-sm !min-h-[40px]'}`}
                 onClick={() => {
                   setAuthMode('signup');
                   setAuthError(null);
                 }}
               >
-                <UserPlus className="w-4 h-4" /> Đăng ký tài khoản Phụ huynh
+                <UserPlus className="w-4 h-4" /> Đăng ký
               </button>
             </div>
 
@@ -501,22 +501,22 @@ export default function ParentPortalPage() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
-                      <div className="px-3.5 py-2 rounded-2xl bg-pink-50 border border-pink-200 text-center">
-                        <div className="text-[11px] text-ink-soft">Tổng điểm thi đua</div>
-                        <div className="font-display font-black text-lg text-pink-600">
+                    <div className="grid grid-cols-3 gap-2 w-full sm:w-auto mt-2 sm:mt-0">
+                      <div className="px-2.5 sm:px-3.5 py-2 rounded-2xl bg-pink-50 border border-pink-200 text-center">
+                        <div className="text-[10px] sm:text-[11px] text-ink-soft">Điểm thi đua</div>
+                        <div className="font-display font-black text-base sm:text-lg text-pink-600">
                           {studentStats.totalPoints > 0 ? `+${studentStats.totalPoints}` : studentStats.totalPoints}
                         </div>
                       </div>
-                      <div className="px-3.5 py-2 rounded-2xl bg-mint/40 border border-mint text-center">
-                        <div className="text-[11px] text-ink-soft">Buổi có mặt</div>
-                        <div className="font-display font-black text-lg text-mint-dark">
+                      <div className="px-2.5 sm:px-3.5 py-2 rounded-2xl bg-mint/40 border border-mint text-center">
+                        <div className="text-[10px] sm:text-[11px] text-ink-soft">Có mặt</div>
+                        <div className="font-display font-black text-base sm:text-lg text-mint-dark">
                           {studentStats.presentCount}
                         </div>
                       </div>
-                      <div className="px-3.5 py-2 rounded-2xl bg-lavender/40 border border-lavender text-center">
-                        <div className="text-[11px] text-ink-soft">Nhận xét từ GV</div>
-                        <div className="font-display font-black text-lg text-ink">
+                      <div className="px-2.5 sm:px-3.5 py-2 rounded-2xl bg-lavender/40 border border-lavender text-center">
+                        <div className="text-[10px] sm:text-[11px] text-ink-soft">Nhận xét</div>
+                        <div className="font-display font-black text-base sm:text-lg text-ink">
                           {currentStudentData.sentComments.length}
                         </div>
                       </div>
@@ -524,27 +524,36 @@ export default function ParentPortalPage() {
                   </div>
 
                   {/* Thanh chuyển tab */}
-                  <div className="flex flex-wrap gap-2 border-t border-pink-100 pt-4">
+                  <div className="grid grid-cols-3 gap-1.5 sm:flex sm:flex-wrap sm:gap-2 border-t border-pink-100 pt-3 sm:pt-4">
                     <button
                       type="button"
-                      className={activeTab === 'comments' ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}
+                      className={`text-center justify-center flex flex-col sm:flex-row items-center gap-1 sm:gap-1.5 p-2 sm:px-3 sm:py-1.5 text-xs rounded-xl ${
+                        activeTab === 'comments' ? 'bg-pink-500 text-white font-bold shadow-soft' : 'bg-pink-50 text-ink-soft hover:text-ink'
+                      }`}
                       onClick={() => setActiveTab('comments')}
                     >
-                      <MessageSquareHeart className="w-4 h-4" /> Nhận xét của Giáo viên ({currentStudentData.sentComments.length})
+                      <MessageSquareHeart className="w-4 h-4 shrink-0" />
+                      <span className="truncate">Nhận xét ({currentStudentData.sentComments.length})</span>
                     </button>
                     <button
                       type="button"
-                      className={activeTab === 'points' ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}
+                      className={`text-center justify-center flex flex-col sm:flex-row items-center gap-1 sm:gap-1.5 p-2 sm:px-3 sm:py-1.5 text-xs rounded-xl ${
+                        activeTab === 'points' ? 'bg-pink-500 text-white font-bold shadow-soft' : 'bg-pink-50 text-ink-soft hover:text-ink'
+                      }`}
                       onClick={() => setActiveTab('points')}
                     >
-                      <Sparkles className="w-4 h-4" /> Điểm thi đua ({currentStudentData.points.length})
+                      <Sparkles className="w-4 h-4 shrink-0" />
+                      <span className="truncate">Thi đua ({currentStudentData.points.length})</span>
                     </button>
                     <button
                       type="button"
-                      className={activeTab === 'attendance' ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}
+                      className={`text-center justify-center flex flex-col sm:flex-row items-center gap-1 sm:gap-1.5 p-2 sm:px-3 sm:py-1.5 text-xs rounded-xl ${
+                        activeTab === 'attendance' ? 'bg-pink-500 text-white font-bold shadow-soft' : 'bg-pink-50 text-ink-soft hover:text-ink'
+                      }`}
                       onClick={() => setActiveTab('attendance')}
                     >
-                      <CalendarCheck className="w-4 h-4" /> Điểm danh ({currentStudentData.attendance.length})
+                      <CalendarCheck className="w-4 h-4 shrink-0" />
+                      <span className="truncate">Điểm danh ({currentStudentData.attendance.length})</span>
                     </button>
                   </div>
                 </div>

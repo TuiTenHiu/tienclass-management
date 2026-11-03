@@ -52,3 +52,23 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
     </div>
   );
 }
+
+export function PageSkeleton({ label = 'Đang tải dữ liệu...' }: { label?: string }) {
+  return (
+    <div className="space-y-4 animate-pulse p-2 sm:p-4 w-full max-w-5xl mx-auto" role="status" aria-label={label}>
+      <div className="flex items-center justify-between">
+        <div className="h-7 w-44 bg-pink-100/80 rounded-xl" />
+        <div className="h-7 w-28 bg-pink-100/50 rounded-xl hidden sm:block" />
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="h-20 bg-pink-50/80 rounded-card border border-pink-100/70" />
+        <div className="h-20 bg-pink-50/80 rounded-card border border-pink-100/70" />
+        <div className="h-20 bg-pink-50/80 rounded-card border border-pink-100/70" />
+        <div className="h-20 bg-pink-50/80 rounded-card border border-pink-100/70" />
+      </div>
+      <div className="h-52 bg-pink-50/60 rounded-card border border-pink-100/60 flex items-center justify-center">
+        <span className="text-xs text-ink-soft/60">{label}</span>
+      </div>
+    </div>
+  );
+}

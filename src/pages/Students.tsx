@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { lazy, Suspense, useMemo, useState } from 'react';
 import {
   Plus,
   FileSpreadsheet,
@@ -25,7 +25,6 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/ToastNotification';
 import { StudentFormModal } from '../features/students/StudentFormModal';
-import { ImportExcelModal } from '../features/students/ImportExcelModal';
 import { StudentProfileModal } from '../features/students/StudentProfileModal';
 import {
   archiveStudents,
@@ -33,9 +32,12 @@ import {
   restoreStudents,
   transferStudents,
 } from '../data/repo';
-import { downloadSheets, studentsToRows } from '../lib/excel';
 import { matchesSearch } from '../lib/utils';
 import type { Student } from '../types';
+
+const ImportExcelModal = lazy(() =>
+  import('../features/students/ImportExcelModal').then((m) => ({ default: m.ImportExcelModal })),
+);
 
 export default function StudentsPage() {
   const { classes, currentClass } = useApp();
@@ -123,11 +125,16 @@ export default function StudentsPage() {
     }
   };
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
     if (!currentClass || !students) return;
-    const rows = studentsToRows(students, (id) => classes.find((c) => c.id === id)?.name ?? '');
-    downloadSheets(`Danh_sach_lop_${currentClass.name}`, [{ name: currentClass.name, rows }]);
-    toast.success('Đã tải xuống danh sách học sinh dạng Excel');
+    try {
+      const { downloadSheets, studentsToRows } = await import('../lib/excel');
+      const rows = studentsToRows(students, (id) => classes.find((c) => c.id === id)?.name ?? '');
+      downloadSheets(`Danh_sach_lop_${currentClass.name}`, [{ name: currentClass.name, rows }]);
+      toast.success('Đã tải xuống danh sách học sinh dạng Excel');
+    } catch {
+      toast.error('Không thể xuất danh sách học sinh');
+    }
   };
 
   if (!currentClass) return null;
@@ -138,15 +145,15 @@ export default function StudentsPage() {
         title={`Học sinh lớp ${currentClass.name}`}
         description={`Tổng số: ${filtered.length} học sinh ${statusFilter === 'archived' ? '(Lưu trữ)' : ''}`}
         actions={
-          <>
-            <button className="btn-outline" onClick={exportExcel} disabled={!students?.length}>
+          <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+            <button className="btn-outline flex-1 sm:flex-none text-xs sm:text-sm" onClick={exportExcel} disabled={!students?.length}>
               <Download className="w-4 h-4" /> Xuất Excel
             </button>
-            <button className="btn-secondary" onClick={() => setImportOpen(true)}>
+            <button className="btn-secondary flex-1 sm:flex-none text-xs sm:text-sm" onClick={() => setImportOpen(true)}>
               <FileSpreadsheet className="w-4 h-4" /> Nhập Excel
             </button>
             <button
-              className="btn-primary"
+              className="btn-primary w-full sm:w-auto text-xs sm:text-sm"
               onClick={() => {
                 setEditingStudent(null);
                 setFormOpen(true);
@@ -154,7 +161,7 @@ export default function StudentsPage() {
             >
               <Plus className="w-4 h-4" /> Thêm học sinh
             </button>
-          </>
+          </div>
         }
       />
 
@@ -333,12 +340,16 @@ export default function StudentsPage() {
         editing={editingStudent}
       />
 
-      <ImportExcelModal
-        open={importOpen}
-        onClose={() => setImportOpen(false)}
-        classId={classId!}
-        className={currentClass.name}
-      />
+      {importOpen && (
+        <Suspense fallback={null}>
+          <ImportExcelModal
+            open={importOpen}
+            onClose={() => setImportOpen(false)}
+            classId={classId!}
+            className={currentClass.name}
+          />
+        </Suspense>
+      )}
 
       <StudentProfileModal
         student={profileStudent}

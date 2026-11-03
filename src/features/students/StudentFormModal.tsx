@@ -5,13 +5,44 @@ import { Field } from '../../components/ui';
 import { useToast } from '../../components/ToastNotification';
 import { ALL_AVATAR_KEYS, ANIMALS, ANIMAL_LABEL, AnimalAvatarSVG, BG_KEYS, AVATAR_BGS, parseAvatarKey, randomAvatarKey } from '../../components/avatars';
 import { addStudent, suggestNextCode, updateStudent, ValidationError, type StudentInput } from '../../data/repo';
+import { LEGACY_DB_NAME, type PinkDB } from '../../data/db';
+import { useApp } from '../../state/AppContext';
 import type { Student } from '../../types';
 
 const EMPTY: StudentInput = { code: '', fullName: '', birthDate: '', gender: '', avatar: 'cat-pink', parentName: '', parentPhone: '', note: '' };
 
+function getInitialForm(editing: Student | null): StudentInput {
+  if (editing) {
+    return {
+      code: editing.code,
+      fullName: editing.fullName,
+      birthDate: editing.birthDate ?? '',
+      gender: editing.gender,
+      avatar: editing.avatar,
+      parentName: editing.parentName ?? '',
+      parentPhone: editing.parentPhone ?? '',
+      note: editing.note ?? '',
+    };
+  }
+  return { ...EMPTY, avatar: randomAvatarKey() };
+}
+
+function useSafeUserDb(): PinkDB | null {
+  try {
+    const app = useApp();
+    if (!app?.db || app.db.name === LEGACY_DB_NAME) {
+      return null;
+    }
+    return app.db;
+  } catch {
+    return null;
+  }
+}
+
 export function StudentFormModal({ open, onClose, classId, editing }: { open: boolean; onClose: () => void; classId: string; editing: Student | null }) {
   const toast = useToast();
-  const [form, setForm] = useState<StudentInput>(EMPTY);
+  const userDb = useSafeUserDb();
+  const [form, setForm] = useState<StudentInput>(() => getInitialForm(editing));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [addAnother, setAddAnother] = useState(false);
@@ -19,25 +50,17 @@ export function StudentFormModal({ open, onClose, classId, editing }: { open: bo
   const reset = async () => {
     setErrors({});
     if (editing) {
-      setForm({
-        code: editing.code,
-        fullName: editing.fullName,
-        birthDate: editing.birthDate ?? '',
-        gender: editing.gender,
-        avatar: editing.avatar,
-        parentName: editing.parentName ?? '',
-        parentPhone: editing.parentPhone ?? '',
-        note: editing.note ?? '',
-      });
+      setForm(getInitialForm(editing));
     } else {
-      setForm({ ...EMPTY, code: await suggestNextCode(), avatar: randomAvatarKey() });
+      const nextCode = await suggestNextCode(userDb ?? undefined);
+      setForm({ ...EMPTY, code: nextCode, avatar: randomAvatarKey() });
     }
   };
 
   useEffect(() => {
     if (open) reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, editing]);
+  }, [open, editing, userDb]);
 
   const set = <K extends keyof StudentInput>(k: K, v: StudentInput[K]) => {
     setForm((f) => ({ ...f, [k]: v }));
@@ -48,18 +71,25 @@ export function StudentFormModal({ open, onClose, classId, editing }: { open: bo
     setBusy(true);
     try {
       if (editing) {
-        await updateStudent(editing.id, form);
+        await updateStudent(editing.id, form, userDb ?? undefined);
         toast.success('Đã lưu hồ sơ học sinh');
         onClose();
       } else {
-        const s = await addStudent(classId, form);
+        const s = await addStudent(classId, form, userDb ?? undefined);
         toast.success(`Đã thêm ${s.fullName}`);
         if (addAnother) await reset();
         else onClose();
       }
     } catch (e) {
-      if (e instanceof ValidationError) setErrors(e.fields);
-      else toast.error('Không lưu được hồ sơ. Vui lòng thử lại.');
+      console.error('[StudentFormModal] Lỗi khi lưu học sinh:', e);
+      if (e instanceof ValidationError) {
+        setErrors(e.fields);
+        const firstError = Object.values(e.fields)[0];
+        toast.error(firstError || 'Thông tin học sinh chưa hợp lệ. Vui lòng kiểm tra lại.');
+      } else {
+        const message = e instanceof Error && e.message ? e.message : 'Không lưu được hồ sơ. Vui lòng thử lại.';
+        toast.error(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -118,13 +148,13 @@ export function StudentFormModal({ open, onClose, classId, editing }: { open: bo
               </button>
             ))}
           </div>
-          <div className="flex gap-1.5 mt-2.5">
+          <div className="flex gap-2 mt-2.5">
             {BG_KEYS.map((b) => (
               <button
                 key={b}
                 type="button"
                 onClick={() => set('avatar', `${animal}-${b}`)}
-                className={`w-6 h-6 rounded-full border-2 ${b === bgKey ? 'border-ink' : 'border-white'}`}
+                className={`w-7 h-7 sm:w-6 sm:h-6 rounded-full border-2 transition active:scale-95 ${b === bgKey ? 'border-ink scale-110 shadow-sm' : 'border-white'}`}
                 style={{ background: AVATAR_BGS[b] }}
                 aria-label={`Màu nền ${b}`}
               />

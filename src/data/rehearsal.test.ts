@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, ALL_TABLES } from './db';
 import {
   buildMigrationPreview,
@@ -7,6 +7,8 @@ import {
   executeMigration,
   restoreIndexedDbFromBackup,
   verifyBackupRoundTrip,
+  setLegacyMigrationAccessForTesting,
+  LEGACY_MIGRATION_TEST_TOKEN,
 } from './migration';
 import { buildSyntheticRehearsalFixture } from './rehearsalFixture';
 
@@ -317,6 +319,11 @@ describe('TIENCLASS — BƯỚC 3.7: DIỄN TẬP DI TRÚ CÓ KIỂM SOÁT (REHE
   beforeEach(async () => {
     resetCloudDb();
     await loadRehearsalFixtureIntoDexie();
+    setLegacyMigrationAccessForTesting(LEGACY_MIGRATION_TEST_TOKEN, true);
+  });
+
+  afterEach(() => {
+    setLegacyMigrationAccessForTesting(LEGACY_MIGRATION_TEST_TOKEN, false);
   });
 
   it('Giai đoạn 1 & 2: Rà soát & Khởi tạo Fixture diễn tập cô lập không chứa dữ liệu thật', async () => {

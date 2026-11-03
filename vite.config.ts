@@ -9,6 +9,10 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-supabase': ['@supabase/supabase-js'],
+          'vendor-dexie': ['dexie', 'dexie-react-hooks'],
+          'vendor-icons': ['lucide-react'],
           phaser: ['phaser'],
           charts: ['recharts'],
           xlsx: ['xlsx'],

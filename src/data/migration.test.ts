@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isUUID } from '../lib/utils';
 
 /* ============================================================================
@@ -312,6 +312,8 @@ import {
   resolveCloudId,
   validateMigrationBackup,
   verifyBackupRoundTrip,
+  setLegacyMigrationAccessForTesting,
+  LEGACY_MIGRATION_TEST_TOKEN,
   type MigrationIdMappingRecord,
 } from './migration';
 import { getPendingSyncQueue, savePendingSyncQueue } from './repo';
@@ -381,6 +383,11 @@ beforeEach(async () => {
   resetCloudDb();
   for (const t of ALL_TABLES) await db.table(t).clear();
   await seed();
+  setLegacyMigrationAccessForTesting(LEGACY_MIGRATION_TEST_TOKEN, true);
+});
+
+afterEach(() => {
+  setLegacyMigrationAccessForTesting(LEGACY_MIGRATION_TEST_TOKEN, false);
 });
 
 describe('Bước 3.6 — Giai đoạn A/B: sao lưu & xem trước', () => {
